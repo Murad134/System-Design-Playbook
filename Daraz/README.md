@@ -142,6 +142,18 @@ sequenceDiagram
     DB->>Q: Notification event
 ```
 
+  ### Architecture-wise request path
+
+  1. **Frontend layer:** Customer বা seller UI API client-এর মাধ্যমে HTTPS request পাঠায়। UI local state এবং server state আলাদা রাখে।
+  2. **API layer:** API Gateway authentication, authorization, rate limit এবং request routing করে।
+  3. **Business layer:** Catalog, Cart, Checkout, Inventory, Payment এবং Shipment module business rule প্রয়োগ করে।
+  4. **Data layer:** PostgreSQL transaction, constraint এবং lock দিয়ে order, stock, payment ও reservation-এর consistency নিশ্চিত করে। Redis শুধু cache হিসেবে কাজ করে।
+  5. **External layer:** Payment Gateway payment process করে এবং signed webhook পাঠায়। Queue/Outbox notification ও retryable side effect process করে।
+
+  **Interview-এ বলার sequence:**
+
+  > Customer frontend থেকে checkout request পাঠায়। API Gateway request authenticate করে Checkout module-এ পাঠায়। Checkout module PostgreSQL transaction-এর মধ্যে current price validate, inventory reserve, order এবং payment record তৈরি করে। Commit-এর পরে Payment Gateway session শুরু হয়। Gateway webhook এলে Payment module signature verify করে order ও payment update করে। তারপর Outbox/Queue notification এবং tracking update process করে।
+
 ### Complete checkout flow
 
 1. Customer cart থেকে product ID এবং quantity পাঠায়।
@@ -441,6 +453,18 @@ Refund হলে: `REFUND_PENDING → REFUNDED`। Signed webhook বা verifie
 | `POST` | `/api/v1/auth/login` | Login |
 | `POST` | `/api/v1/auth/refresh` | Token refresh |
 | `GET` | `/api/v1/users/me` | নিজের profile |
+| `PATCH` | `/api/v1/users/me` | Profile update |
+| `POST` | `/api/v1/auth/logout` | Current session invalidate |
+
+### Address
+
+| Method | Endpoint | কাজ |
+|---|---|---|
+| `GET` | `/api/v1/addresses` | নিজের address list |
+| `POST` | `/api/v1/addresses` | নতুন delivery address |
+| `GET` | `/api/v1/addresses/:addressId` | Address details |
+| `PATCH` | `/api/v1/addresses/:addressId` | Address update |
+| `DELETE` | `/api/v1/addresses/:addressId` | Address delete |
 
 ### Product ও Inventory
 
@@ -451,6 +475,10 @@ Refund হলে: `REFUND_PENDING → REFUNDED`। Signed webhook বা verifie
 | `POST` | `/api/v1/seller/products` | Seller product তৈরি |
 | `PATCH` | `/api/v1/seller/products/:productId` | Product update |
 | `PUT` | `/api/v1/seller/products/:productId/inventory` | Stock adjustment |
+| `GET` | `/api/v1/seller/products` | নিজের product list |
+| `GET` | `/api/v1/seller/products/:productId` | নিজের product details |
+| `DELETE` | `/api/v1/seller/products/:productId` | Product deactivate |
+| `GET` | `/api/v1/products/:productId/inventory` | Product availability |
 
 Seller arbitrary `available_qty` overwrite না করে stock adjustment বা stock movement ব্যবহার করবে।
 
@@ -462,6 +490,7 @@ Seller arbitrary `available_qty` overwrite না করে stock adjustment ব
 | `POST` | `/api/v1/cart/items` | Product যোগ |
 | `PATCH` | `/api/v1/cart/items/:productId` | Quantity update |
 | `DELETE` | `/api/v1/cart/items/:productId` | Item remove |
+| `DELETE` | `/api/v1/cart` | Cart empty করা |
 
 ### Checkout ও Order
 
@@ -471,6 +500,29 @@ Seller arbitrary `available_qty` overwrite না করে stock adjustment ব
 | `GET` | `/api/v1/orders` | Order history |
 | `GET` | `/api/v1/orders/:orderId` | Order details |
 | `POST` | `/api/v1/orders/:orderId/cancel` | Order cancel |
+| `GET` | `/api/v1/orders/:orderId/items` | Order items |
+| `GET` | `/api/v1/orders/:orderId/status` | Current order status |
+| `POST` | `/api/v1/orders/:orderId/retry-payment` | Payment retry |
+
+### Seller Order Management
+
+| Method | Endpoint | কাজ |
+|---|---|---|
+| `GET` | `/api/v1/seller/orders` | Seller-এর order list |
+| `GET` | `/api/v1/seller/orders/:orderId` | Seller order details |
+| `PATCH` | `/api/v1/seller/orders/:orderId/confirm` | Order confirm |
+| `PATCH` | `/api/v1/seller/orders/:orderId/reject` | Order reject |
+| `PATCH` | `/api/v1/seller/orders/:orderId/processing` | Processing শুরু |
+| `PATCH` | `/api/v1/seller/orders/:orderId/packed` | Product packed করা |
+
+### Coupon
+
+| Method | Endpoint | কাজ |
+|---|---|---|
+| `GET` | `/api/v1/coupons/:code` | Coupon details/validity |
+| `POST` | `/api/v1/coupons/validate` | Checkout-এর আগে coupon validate |
+| `POST` | `/api/v1/seller/coupons` | Seller coupon তৈরি |
+| `PATCH` | `/api/v1/seller/coupons/:couponId` | Coupon update/deactivate |
 
 Checkout request:
 
@@ -502,8 +554,30 @@ Client-এর price, discount এবং total trust করা যাবে ন�
 | `GET` | `/api/v1/payments/:paymentId` | Payment status |
 | `POST` | `/api/v1/webhooks/payments/:provider` | Gateway webhook |
 | `POST` | `/api/v1/orders/:orderId/refund` | Refund request |
+| `GET` | `/api/v1/orders/:orderId/payments` | Order-এর payment attempts |
+| `POST` | `/api/v1/payments/:paymentId/cancel` | Pending payment cancel |
+| `GET` | `/api/v1/refunds/:refundId` | Refund status |
+| `POST` | `/api/v1/admin/payments/:paymentId/reconcile` | Payment reconcile |
 
 Webhook-এ provider signature, timestamp, replay protection এবং event ID verify করতে হবে। সাধারণ user JWT নয়, provider signature ব্যবহার করতে হবে।
+
+### Delivery/Tracking
+
+| Method | Endpoint | কাজ |
+|---|---|---|
+| `POST` | `/api/v1/orders/:orderId/shipments` | Shipment তৈরি |
+| `GET` | `/api/v1/orders/:orderId/shipment` | Shipment details |
+| `GET` | `/api/v1/orders/:orderId/tracking` | Delivery tracking |
+| `PATCH` | `/api/v1/seller/shipments/:shipmentId/status` | Shipment status update |
+
+### Admin
+
+| Method | Endpoint | কাজ |
+|---|---|---|
+| `GET` | `/api/v1/admin/orders` | সব order search |
+| `GET` | `/api/v1/admin/users` | User management |
+| `PATCH` | `/api/v1/admin/products/:productId/status` | Product moderate |
+| `GET` | `/api/v1/admin/inventory/low-stock` | Low-stock product list |
 
 ### Error response
 
