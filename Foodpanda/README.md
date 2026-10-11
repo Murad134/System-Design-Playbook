@@ -10,91 +10,91 @@
 
 ## সূচিপত্র
 
-1. [Problem Statement](#1-problem-statement)
-2. [Requirements](#2-requirements)
-3. [High-Level Architecture](#3-high-level-architecture)
-4. [Database Design](#4-database-design)
-5. [Status Management](#5-status-management)
-6. [ER Diagram](#6-er-diagram)
-7. [REST API Design](#7-rest-api-design)
-8. [Complete Order Flow](#8-complete-order-flow)
-9. [Duplicate Order and Rider Assignment Prevention](#9-duplicate-order-and-rider-assignment-prevention)
-10. [Payment and Order Expiry Mechanism](#10-payment-and-order-expiry-mechanism)
-11. [Payment Failure and Delayed Webhooks](#11-payment-failure-and-delayed-webhooks)
-12. [Database Transactions](#12-database-transactions)
-13. [ACID Properties](#13-acid-properties)
-14. [Security and Reliability](#14-security-and-reliability)
-15. [Scalability and Performance](#15-scalability-and-performance)
-16. [Test Cases](#16-test-cases)
-17. [Implementation Plan](#17-implementation-plan)
-18. [Short Interview Answers](#18-short-interview-answers)
-19. [Final Interview Checklist](#19-final-interview-checklist)
-20. [Future Improvements](#20-future-improvements)
+1. [সমস্যার বিবরণ](#১-সমস্যার-বিবরণ)
+2. [প্রয়োজনীয়তা](#২-প্রয়োজনীয়তা)
+3. [উচ্চ-স্তরের আর্কিটেকচার](#৩-উচ্চ-স্তরের-আর্কিটেকচার)
+4. [ডেটাবেস ডিজাইন](#৪-ডেটাবেস-ডিজাইন)
+5. [স্ট্যাটাস ব্যবস্থাপনা](#৫-স্ট্যাটাস-ব্যবস্থাপনা)
+6. [ER ডায়াগ্রাম](#৬-er-ডায়াগ্রাম)
+7. [REST API ডিজাইন](#৭-rest-api-ডিজাইন)
+8. [সম্পূর্ণ অর্ডার প্রবাহ](#৮-সম্পূর্ণ-অর্ডার-প্রবাহ)
+9. [ডুপ্লিকেট অর্ডার ও রাইডার অ্যাসাইনমেন্ট প্রতিরোধ](#৯-ডুপ্লিকেট-অর্ডার-ও-রাইডার-অ্যাসাইনমেন্ট-প্রতিরোধ)
+10. [পেমেন্ট ও অর্ডারের মেয়াদ শেষ হওয়ার ব্যবস্থা](#১০-পেমেন্ট-ও-অর্ডারের-মেয়াদ-শেষ-হওয়ার-ব্যবস্থা)
+11. [পেমেন্ট ব্যর্থতা ও বিলম্বিত ওয়েবহুক](#১১-পেমেন্ট-ব্যর্থতা-ও-বিলম্বিত-ওয়েবহুক)
+12. [ডেটাবেস ট্রানজ্যাকশন](#১২-ডেটাবেস-ট্রানজ্যাকশন)
+13. [ACID বৈশিষ্ট্য](#১৩-acid-বৈশিষ্ট্য)
+14. [নিরাপত্তা ও নির্ভরযোগ্যতা](#১৪-নিরাপত্তা-ও-নির্ভরযোগ্যতা)
+15. [স্কেলযোগ্যতা ও পারফরম্যান্স](#১৫-স্কেলযোগ্যতা-ও-পারফরম্যান্স)
+16. [টেস্ট কেস](#১৬-টেস্ট-কেস)
+17. [বাস্তবায়ন পরিকল্পনা](#১৭-বাস্তবায়ন-পরিকল্পনা)
+18. [সংক্ষিপ্ত ইন্টারভিউ উত্তর](#১৮-সংক্ষিপ্ত-ইন্টারভিউ-উত্তর)
+19. [চূড়ান্ত ইন্টারভিউ চেকলিস্ট](#১৯-চূড়ান্ত-ইন্টারভিউ-চেকলিস্ট)
+20. [ভবিষ্যৎ উন্নয়ন](#২০-ভবিষ্যৎ-উন্নয়ন)
 
 ---
 
 ## ১. সমস্যার বিবরণ
 
-Design a food delivery platform similar to Foodpanda that allows customers to browse restaurants, order food, pay online, and receive deliveries from riders.
+Foodpanda-এর মতো একটি ফুড ডেলিভারি প্ল্যাটফর্ম ডিজাইন করতে হবে, যেখানে গ্রাহক রেস্টুরেন্ট দেখতে, খাবার অর্ডার করতে, অনলাইনে পেমেন্ট করতে এবং রাইডারের মাধ্যমে ডেলিভারি পেতে পারবেন।
 
-Restaurants should be able to accept or reject incoming orders. The system must assign an available rider to an accepted order and allow customers to track delivery progress.
+রেস্টুরেন্ট ইনকামিং অর্ডার গ্রহণ বা প্রত্যাখ্যান করতে পারবে। সিস্টেমকে গৃহীত অর্ডারের জন্য একজন উপলব্ধ রাইডার নির্ধারণ করতে হবে এবং গ্রাহককে ডেলিভারির অগ্রগতি ট্র্যাক করার সুযোগ দিতে হবে।
 
-The platform must maintain accurate order and payment records while preventing duplicate orders, duplicate refunds, and multiple riders being assigned to the same order.
+প্ল্যাটফর্মকে সঠিক অর্ডার ও পেমেন্ট রেকর্ড সংরক্ষণ করতে হবে এবং ডুপ্লিকেট অর্ডার, ডুপ্লিকেট রিফান্ড ও একই অর্ডারে একাধিক রাইডার অ্যাসাইনমেন্ট প্রতিরোধ করতে হবে।
 
-It must also handle payment failures, restaurant rejection, rider unavailability, customer cancellation, and repeated payment gateway webhooks.
+এছাড়া পেমেন্ট ব্যর্থতা, রেস্টুরেন্টের প্রত্যাখ্যান, রাইডার অনুপলব্ধতা, গ্রাহকের বাতিলকরণ এবং একই পেমেন্ট গেটওয়ে ওয়েবহুক বারবার আসার বিষয়ও পরিচালনা করতে হবে।
 
-### Main Challenges
+### প্রধান চ্যালেঞ্জ
 
-- Prevent duplicate orders when customers click the Place Order button multiple times.
-- Maintain consistency between orders and order items.
-- Prevent two riders from accepting the same order.
-- Handle successful payments when restaurants reject orders.
-- Process refunds safely without duplicate transactions.
-- Maintain consistency when external payment gateways fail or respond slowly.
+- গ্রাহক একাধিকবার Place Order বাটনে ক্লিক করলে ডুপ্লিকেট অর্ডার প্রতিরোধ করা।
+- অর্ডার ও অর্ডার আইটেমের মধ্যে সামঞ্জস্য বজায় রাখা।
+- দুইজন রাইডার যেন একই অর্ডার গ্রহণ করতে না পারে তা নিশ্চিত করা।
+- রেস্টুরেন্ট অর্ডার প্রত্যাখ্যান করলেও সফল পেমেন্ট পরিচালনা করা।
+- ডুপ্লিকেট ট্রানজ্যাকশন ছাড়া নিরাপদে রিফান্ড প্রসেস করা।
+- বাহ্যিক পেমেন্ট গেটওয়ে ব্যর্থ হলে বা ধীরে উত্তর দিলে সামঞ্জস্য বজায় রাখা।
 
 ---
 
 ## ২. প্রয়োজনীয়তা
 
-### 2.1 Functional Requirements
+### ২.১ কার্যকরী প্রয়োজনীয়তা
 
-1. Customers can register, log in, and manage profiles.
-2. Customers can search restaurants and browse menus.
-3. Customers can add multiple food items to a cart.
-4. Customers can place orders and pay online.
-5. Restaurants can accept or reject orders.
-6. The system assigns an available rider to an accepted order.
-7. Customers can track their order status.
-8. Customers can view order history and cancel eligible orders.
-9. The system processes refunds when required.
-10. Riders can view assigned deliveries and update delivery status.
+১. গ্রাহক নিবন্ধন, লগইন এবং প্রোফাইল পরিচালনা করতে পারবেন।
+২. গ্রাহক রেস্টুরেন্ট খুঁজে মেনু দেখতে পারবেন।
+৩. গ্রাহক কার্টে একাধিক খাবার যোগ করতে পারবেন।
+৪. গ্রাহক অর্ডার করতে এবং অনলাইনে পেমেন্ট করতে পারবেন।
+৫. রেস্টুরেন্ট অর্ডার গ্রহণ বা প্রত্যাখ্যান করতে পারবে।
+৬. সিস্টেম গৃহীত অর্ডারের জন্য একজন উপলব্ধ রাইডার নির্ধারণ করবে।
+৭. গ্রাহক অর্ডারের স্ট্যাটাস ট্র্যাক করতে পারবেন।
+৮. গ্রাহক অর্ডারের ইতিহাস দেখতে এবং যোগ্য অর্ডার বাতিল করতে পারবেন।
+৯. প্রয়োজন হলে সিস্টেম রিফান্ড প্রসেস করবে।
+১০. রাইডার নির্ধারিত ডেলিভারি দেখতে এবং ডেলিভারি স্ট্যাটাস আপডেট করতে পারবেন।
 
-### 2.2 Non-Functional Requirements
+### ২.২ অ-কার্যকরী প্রয়োজনীয়তা
 
-- **Consistency:** Order and payment records must remain accurate.
-- **Availability:** Customers should be able to browse restaurants even if a noncritical service is unavailable.
-- **Reliability:** Failed operations should be recoverable.
-- **Security:** Only authorized users can access or modify their resources.
-- **Scalability:** The platform should support increasing orders and users.
-- **Performance:** Restaurant listings and menus should load quickly.
-- **Idempotency:** Retried requests must not create duplicate orders or refunds.
+- **সামঞ্জস্য:** অর্ডার ও পেমেন্ট রেকর্ড সঠিক থাকতে হবে।
+- **প্রাপ্যতা:** কোনো অগুরুত্বপূর্ণ সার্ভিস বন্ধ থাকলেও গ্রাহক যেন রেস্টুরেন্ট দেখতে পারেন।
+- **নির্ভরযোগ্যতা:** ব্যর্থ অপারেশন পুনরুদ্ধার করা সম্ভব হতে হবে।
+- **নিরাপত্তা:** শুধু অনুমোদিত ব্যবহারকারী নিজের রিসোর্স দেখতে বা পরিবর্তন করতে পারবেন।
+- **স্কেলযোগ্যতা:** ব্যবহারকারী ও অর্ডার বাড়লেও প্ল্যাটফর্ম চলতে হবে।
+- **পারফরম্যান্স:** রেস্টুরেন্ট তালিকা ও মেনু দ্রুত লোড হতে হবে।
+- **আইডেমপোটেন্সি:** রিকোয়েস্ট পুনরায় পাঠালেও ডুপ্লিকেট অর্ডার বা রিফান্ড তৈরি হবে না।
 
-### 2.3 Business Rules
+### ২.৩ ব্যবসায়িক নিয়ম
 
-- Every order has a unique ID.
-- Every order contains at least one item.
-- The backend calculates the final price.
-- An order can have only one active rider assignment.
-- Only eligible orders can be cancelled.
-- A rejected paid order must enter the refund workflow.
-- Payment and order statuses are managed separately.
-- All status transitions must follow valid business rules.
+- প্রতিটি অর্ডারের একটি ইউনিক ID থাকবে।
+- প্রতিটি অর্ডারে অন্তত একটি আইটেম থাকবে।
+- ব্যাকএন্ড চূড়ান্ত মূল্য হিসাব করবে।
+- একটি অর্ডারে সর্বোচ্চ একজন সক্রিয় রাইডার অ্যাসাইন থাকতে পারবেন।
+- শুধু যোগ্য অর্ডার বাতিল করা যাবে।
+- পেমেন্ট করা প্রত্যাখ্যাত অর্ডারকে রিফান্ড workflow-তে যেতে হবে।
+- পেমেন্ট ও অর্ডারের স্ট্যাটাস আলাদাভাবে পরিচালিত হবে।
+- সব স্ট্যাটাস পরিবর্তন বৈধ ব্যবসায়িক নিয়ম মেনে হতে হবে।
 
 ---
 
 ## ৩. উচ্চ-স্তরের আর্কিটেকচার
 
-The system can initially be implemented as a modular monolith. Separate services can be introduced when traffic and operational requirements justify them.
+শুরুতে সিস্টেমটি একটি modular monolith হিসেবে বাস্তবায়ন করা যায়। ট্রাফিক ও অপারেশনাল প্রয়োজন অনুযায়ী পরে আলাদা সার্ভিস যোগ করা যাবে।
 
 ```mermaid
 flowchart TD
@@ -139,29 +139,29 @@ flowchart TD
     QUEUE --> NOTI
 ```
 
-### Component Responsibilities
+### কম্পোনেন্টের দায়িত্ব
 
-| Component | Responsibility |
+| কম্পোনেন্ট | দায়িত্ব |
 |---|---|
-| Customer App | Browse menus, order food, pay, track deliveries |
-| Restaurant Dashboard | Accept or reject orders |
-| Rider App | Accept assigned work and update delivery progress |
-| Backend API | Validate requests and enforce business rules |
-| Order Module | Manage orders and order items |
-| Payment Module | Handle payments, webhook events, and refunds |
-| Rider Module | Find riders and prevent conflicting assignments |
-| Relational Database | Store transactional business data |
-| Redis | Cache frequently accessed restaurant and menu data |
-| Message Queue | Process notifications and background tasks |
-| Payment Gateway | Process online payments and refunds |
+| Customer App | মেনু দেখা, খাবার অর্ডার, পেমেন্ট ও ডেলিভারি ট্র্যাক করা |
+| Restaurant Dashboard | অর্ডার গ্রহণ বা প্রত্যাখ্যান করা |
+| Rider App | নির্ধারিত কাজ গ্রহণ ও ডেলিভারি অগ্রগতি আপডেট করা |
+| Backend API | রিকোয়েস্ট যাচাই ও ব্যবসায়িক নিয়ম প্রয়োগ করা |
+| Order Module | অর্ডার ও অর্ডার আইটেম পরিচালনা করা |
+| Payment Module | পেমেন্ট, ওয়েবহুক ইভেন্ট ও রিফান্ড পরিচালনা করা |
+| Rider Module | রাইডার খুঁজে বের করা ও দ্বন্দ্বপূর্ণ অ্যাসাইনমেন্ট ঠেকানো |
+| Relational Database | ট্রানজ্যাকশনভিত্তিক ব্যবসায়িক ডেটা সংরক্ষণ করা |
+| Redis | ঘন ঘন ব্যবহৃত রেস্টুরেন্ট ও মেনু ডেটা ক্যাশ করা |
+| Message Queue | নোটিফিকেশন ও ব্যাকগ্রাউন্ড কাজ প্রসেস করা |
+| Payment Gateway | অনলাইন পেমেন্ট ও রিফান্ড প্রসেস করা |
 
-**Important:** A message queue and Redis are useful enhancements, not mandatory for the first version.
+**গুরুত্বপূর্ণ:** Message queue ও Redis কার্যকর উন্নয়ন, তবে প্রথম সংস্করণের জন্য বাধ্যতামূলক নয়।
 
 ### 3.1 Interview-Oriented Architecture: Frontend to Full System
 
-In an interview, explain the design from the user's screen toward the backend and then walk through one complete order. This keeps the discussion concrete and makes each component's purpose clear.
+ইন্টারভিউতে ব্যবহারকারীর স্ক্রিন থেকে ব্যাকএন্ডের দিকে ডিজাইনটি ব্যাখ্যা করুন, তারপর একটি সম্পূর্ণ অর্ডারের প্রবাহ দেখান। এতে আলোচনা বাস্তবভিত্তিক থাকে এবং প্রতিটি কম্পোনেন্টের উদ্দেশ্য পরিষ্কার হয়।
 
-#### A. Frontend Architecture
+#### ক. ফ্রন্টএন্ড আর্কিটেকচার
 
 ```mermaid
 flowchart LR
@@ -182,34 +182,34 @@ flowchart LR
     TRACK --> UI
 ```
 
-The customer client can be a React web app or a mobile app with the same logical layers. Restaurant and rider clients reuse the API and authentication layers but expose role-specific screens and actions.
+গ্রাহকের ক্লায়েন্ট একই logical layer ব্যবহার করা React web app বা mobile app হতে পারে। রেস্টুরেন্ট ও রাইডার ক্লায়েন্ট API এবং authentication layer পুনরায় ব্যবহার করবে, তবে role-specific screen ও action দেখাবে।
 
-The platform has three primary clients:
+প্ল্যাটফর্মে তিনটি প্রধান ক্লায়েন্ট থাকবে:
 
-| Client | Main screens | Main responsibilities |
+| ক্লায়েন্ট | প্রধান স্ক্রিন | প্রধান দায়িত্ব |
 |---|---|---|
-| Customer app/web | Restaurant list, menu, cart, checkout, order tracking, order history | Browse, create a cart, place an order, pay, and follow status |
-| Restaurant dashboard | Incoming orders, order detail, menu management | Accept or reject orders and update preparation status |
-| Rider app | Available jobs, active delivery, delivery history | Receive an assignment, accept it, update pickup and delivery status |
+| Customer app/web | রেস্টুরেন্ট তালিকা, মেনু, কার্ট, checkout, অর্ডার ট্র্যাকিং, অর্ডার ইতিহাস | দেখা, কার্ট তৈরি, অর্ডার, পেমেন্ট ও স্ট্যাটাস অনুসরণ |
+| Restaurant dashboard | ইনকামিং অর্ডার, অর্ডারের বিবরণ, মেনু ব্যবস্থাপনা | অর্ডার গ্রহণ/প্রত্যাখ্যান ও প্রস্তুতির স্ট্যাটাস আপডেট |
+| Rider app | উপলব্ধ কাজ, সক্রিয় ডেলিভারি, ডেলিভারি ইতিহাস | অ্যাসাইনমেন্ট পাওয়া, গ্রহণ এবং pickup/delivery স্ট্যাটাস আপডেট |
 
-Use a shared API client and authentication layer in each client. Keep server state such as restaurants, orders, and payment status separate from local UI state such as an open modal or selected tab.
+প্রতিটি ক্লায়েন্টে shared API client ও authentication layer ব্যবহার করুন। রেস্টুরেন্ট, অর্ডার ও পেমেন্ট স্ট্যাটাসের মতো server state-কে খোলা modal বা নির্বাচিত tab-এর মতো local UI state থেকে আলাদা রাখুন।
 
-Typical customer-side flow:
+সাধারণ customer-side flow:
 
 ```text
 Restaurant list -> Restaurant menu -> Cart -> Checkout -> Payment -> Order tracking
 ```
 
-Frontend rules that matter in the interview:
+ইন্টারভিউতে গুরুত্বপূর্ণ ফ্রন্টএন্ড নিয়ম:
 
-- Disable or guard the Place Order action while a request is in progress, but do not depend on the UI alone to prevent duplicates.
-- Generate and persist one `Idempotency-Key` for each logical order attempt; reuse it when the request is retried.
-- Display order status from the backend, not from optimistic assumptions after checkout.
-- Treat payment as `PENDING` until a verified backend response or webhook updates it.
-- Show retry, failure, cancellation, and refund-pending states explicitly.
-- Use polling initially for order tracking; introduce WebSockets or server-sent events when real-time updates justify the operational cost.
+- রিকোয়েস্ট চলার সময় Place Order action disable বা guard করুন, তবে ডুপ্লিকেট প্রতিরোধে শুধু UI-এর ওপর নির্ভর করবেন না।
+- প্রতিটি logical order attempt-এর জন্য একটি `Idempotency-Key` তৈরি ও সংরক্ষণ করুন; রিকোয়েস্ট retry হলে একই key ব্যবহার করুন।
+- checkout-এর পর optimistic assumption নয়, ব্যাকএন্ডের order status দেখান।
+- verified backend response বা webhook আপডেট না হওয়া পর্যন্ত payment-কে `PENDING` হিসেবে রাখুন।
+- retry, failure, cancellation ও refund-pending state স্পষ্টভাবে দেখান।
+- শুরুতে order tracking-এর জন্য polling ব্যবহার করুন; real-time update-এর প্রয়োজন ও operational cost যুক্তিযুক্ত হলে WebSocket বা server-sent event যোগ করুন।
 
-#### B. Backend Architecture
+#### খ. ব্যাকএন্ড আর্কিটেকচার
 
 ```mermaid
 flowchart TB
@@ -246,21 +246,21 @@ flowchart TB
     QUEUE --> NOTIFY
 ```
 
-For the first release, these modules run inside one backend application. They should still have separate responsibilities so payment, dispatch, or notification can later be extracted without redesigning the entire system.
+প্রথম release-এ এই module-গুলো একটি backend application-এর ভেতরে চলবে। তবুও এগুলোর দায়িত্ব আলাদা থাকা উচিত, যাতে পরে পুরো সিস্টেম redesign না করেই payment, dispatch বা notification আলাদা করা যায়।
 
-Start with a modular monolith. The modules share one relational database but have clear ownership boundaries:
+একটি modular monolith দিয়ে শুরু করুন। module-গুলো একটি relational database ভাগ করে ব্যবহার করবে, তবে ownership boundary পরিষ্কার থাকবে:
 
-| Module | Owns |
+| Module | দায়িত্ব |
 |---|---|
-| Auth and users | Login, sessions/tokens, roles, and ownership checks |
-| Restaurant and menu | Restaurant discovery, menus, availability, and pricing source data |
-| Cart and checkout | Cart validation and the order creation request |
-| Order management | Order items, order state transitions, cancellation, and history |
-| Payment | Payment attempts, verified webhooks, refunds, and reconciliation |
-| Dispatch | Rider availability, assignment, and delivery state |
-| Notification | Push, email, SMS, and in-app events |
+| Auth and users | Login, session/token, role ও ownership যাচাই |
+| Restaurant and menu | রেস্টুরেন্ট খোঁজা, মেনু, availability ও pricing source data |
+| Cart and checkout | কার্ট validation ও order creation request |
+| Order management | order item, order state transition, cancellation ও history |
+| Payment | payment attempt, verified webhook, refund ও reconciliation |
+| Dispatch | rider availability, assignment ও delivery state |
+| Notification | push, email, SMS ও in-app event |
 
-The request path for order creation is:
+অর্ডার তৈরির request path হলো:
 
 ```text
 Client
@@ -271,19 +271,19 @@ Client
     -> API returns order ID and current status
 ```
 
-The backend must calculate prices from trusted menu data. The client may send item IDs and quantities, but it must never be trusted for the final amount or payment status.
+ব্যাকএন্ডকে trusted menu data থেকে মূল্য হিসাব করতে হবে। client item ID ও quantity পাঠাতে পারে, কিন্তু final amount বা payment status-এর জন্য client-কে কখনো trusted source হিসেবে ধরা যাবে না।
 
-#### C. Full-System Order Flow
+#### গ. সম্পূর্ণ সিস্টেমের অর্ডার প্রবাহ
 
-1. The customer loads restaurants and menus. The API reads from PostgreSQL, with Redis used for safe, short-lived public-data caching.
-2. The customer submits the cart with an `Idempotency-Key`. The order module validates ownership, item availability, and prices.
-3. A database transaction inserts the order and immutable order-item price snapshots. A unique constraint makes retries return the existing order.
-4. The payment module creates a payment attempt and redirects the customer to the gateway or uses the gateway's client-side tokenization flow.
-5. The backend verifies the gateway response or webhook. It updates payment state only after validating the signature, amount, currency, and transaction reference.
-6. The restaurant accepts or rejects the order. A paid rejection creates a durable, idempotent refund job.
-7. After acceptance, dispatch finds a nearby available rider. An atomic update or row lock allows only one valid assignment.
-8. The rider progresses through pickup and delivery states. Each transition is authorized and validated against the previous state.
-9. The order reaches `DELIVERED`; notifications and analytics are processed asynchronously.
+১. গ্রাহক restaurant ও menu load করেন। API PostgreSQL থেকে data পড়ে এবং Redis নিরাপদ, স্বল্পমেয়াদি public-data cache হিসেবে ব্যবহৃত হয়।
+২. গ্রাহক `Idempotency-Key` সহ cart submit করেন। order module ownership, item availability ও price যাচাই করে।
+৩. একটি database transaction order ও immutable order-item price snapshot insert করে। unique constraint retry হলে existing order ফেরত দেয়।
+৪. payment module payment attempt তৈরি করে এবং গ্রাহককে gateway-তে redirect করে বা gateway-এর client-side tokenization flow ব্যবহার করে।
+৫. ব্যাকএন্ড gateway response বা webhook verify করে। signature, amount, currency ও transaction reference যাচাই করার পরই payment state update করে।
+৬. রেস্টুরেন্ট order accept বা reject করে। paid rejection হলে durable ও idempotent refund job তৈরি হয়।
+৭. acceptance-এর পর dispatch কাছাকাছি available rider খুঁজে। atomic update বা row lock-এর মাধ্যমে শুধু একটি valid assignment সফল হয়।
+৮. rider pickup ও delivery state-এর মধ্য দিয়ে অগ্রসর হয়। প্রতিটি transition অনুমোদিত এবং আগের state অনুযায়ী valid হতে হয়।
+৯. order `DELIVERED` হলে notification ও analytics asynchronous ভাবে process হয়।
 
 ```mermaid
 sequenceDiagram
@@ -310,20 +310,20 @@ sequenceDiagram
         API->>Q: Publish notification/analytics job
 ```
 
-#### D. What Happens When Something Fails?
+#### ঘ. কোনো কিছু ব্যর্থ হলে কী হয়?
 
-| Failure | Recovery strategy |
+| ব্যর্থতা | পুনরুদ্ধার কৌশল |
 |---|---|
-| Client retries order creation | Same idempotency key returns the original order |
-| Payment response times out | Reconcile with the gateway; do not charge again blindly |
-| Duplicate webhook | Unique gateway event ID makes processing idempotent |
-| Restaurant rejects a paid order | Set `REFUND_PENDING` and retry a durable refund job |
-| Two riders accept simultaneously | Conditional database update lets exactly one request win |
-| Notification service is down | Keep the business transaction successful and retry notification asynchronously |
+| Client order creation retry করে | একই idempotency key original order ফেরত দেয় |
+| Payment response timeout হয় | gateway-এর সঙ্গে reconcile করুন; অন্ধভাবে আবার charge করবেন না |
+| Duplicate webhook আসে | unique gateway event ID processing-কে idempotent করে |
+| Restaurant paid order reject করে | `REFUND_PENDING` সেট করে durable refund job retry করুন |
+| দুই rider একই সময়ে accept করে | conditional database update-এর মাধ্যমে ঠিক একটি request সফল হয় |
+| Notification service বন্ধ | business transaction সফল রাখুন এবং notification asynchronous ভাবে retry করুন |
 
-#### E. Interview Trade-offs and Scaling Path
+#### ঙ. ইন্টারভিউ trade-off ও scaling path
 
-Say explicitly what you would build first and what you would add later:
+প্রথমে কী তৈরি করবেন এবং পরে কী যোগ করবেন তা স্পষ্টভাবে বলুন:
 
 1. **MVP:** Responsive web or mobile clients, modular monolith, PostgreSQL, and synchronous APIs.
 2. **Reliability:** Idempotency, constraints, background workers, an outbox table, retries, and reconciliation.
@@ -331,17 +331,17 @@ Say explicitly what you would build first and what you would add later:
 4. **Scale:** Read replicas and independently deployable services for payments, dispatch, notifications, and search only when traffic or team ownership requires them.
 5. **Real time:** WebSockets or server-sent events for active-order tracking; polling remains a simpler fallback.
 
-The key interview trade-off is consistency versus availability: browsing can tolerate stale cached data, but order creation, payment state, refunds, and rider assignment require authoritative transactional data.
+মূল interview trade-off হলো consistency বনাম availability: browsing কিছুটা stale cached data সহ্য করতে পারে, কিন্তু order creation, payment state, refund ও rider assignment-এর জন্য authoritative transactional data প্রয়োজন।
 
 ---
 
 ## ৪. ডেটাবেস ডিজাইন
 
-A relational database such as PostgreSQL or MySQL is a good choice because orders, order items, payments, and rider assignments require reliable relationships and transactional updates.
+PostgreSQL বা MySQL-এর মতো relational database ভালো পছন্দ, কারণ order, order item, payment ও rider assignment-এর জন্য নির্ভরযোগ্য relationship এবং transactional update প্রয়োজন।
 
 ### 4.1 Users
 
-Stores customer, restaurant-owner, and administrator account information.
+গ্রাহক, রেস্টুরেন্ট মালিক এবং administrator account-এর তথ্য সংরক্ষণ করে।
 
 | Column | Type | Constraint |
 |---|---|---|
@@ -372,7 +372,7 @@ Stores customer, restaurant-owner, and administrator account information.
 | price | DECIMAL(10,2) | NOT NULL |
 | is_available | BOOLEAN | NOT NULL |
 
-A restaurant can have many menu items.
+একটি রেস্টুরেন্টে একাধিক menu item থাকতে পারে।
 
 ### 4.4 Orders
 
@@ -395,7 +395,7 @@ Suggested `payment_status` values:
 
 `UNPAID`, `PENDING`, `PAID`, `FAILED`, `REFUND_PENDING`, `REFUNDED`.
 
-The order status and payment status must remain separate because an order can be rejected while its payment is already successful.
+order status ও payment status আলাদা রাখতে হবে, কারণ payment সফল হলেও order reject হতে পারে।
 
 ### 4.5 Order Items
 
@@ -408,7 +408,7 @@ The order status and payment status must remain separate because an order can be
 | unit_price | DECIMAL(10,2) | NOT NULL |
 | subtotal | DECIMAL(10,2) | NOT NULL |
 
-The `unit_price` stores a snapshot of the menu item's price at the time of ordering. Later menu price changes must not alter historical orders.
+`unit_price` অর্ডারের সময় menu item-এর মূল্যের snapshot সংরক্ষণ করে। পরে menu-এর দাম পরিবর্তন হলেও historical order পরিবর্তিত হওয়া যাবে না।
 
 ### 4.6 Riders
 
@@ -483,7 +483,7 @@ A refund should have its own status and idempotency key. A unique key prevents t
 
 ## ৫. স্ট্যাটাস ব্যবস্থাপনা
 
-### Order Lifecycle
+### অর্ডারের জীবনচক্র
 
 ```mermaid
 stateDiagram-v2
@@ -502,9 +502,9 @@ stateDiagram-v2
     DELIVERED --> [*]
 ```
 
-Cancellation from `CONFIRMED` or `PREPARING` must be allowed only if business policy permits it. A cancellation after payment may require a refund.
+ব্যবসায়িক নীতি অনুমতি দিলেই শুধু `CONFIRMED` বা `PREPARING` অবস্থা থেকে cancellation অনুমোদন করতে হবে। payment-এর পরে cancellation হলে refund প্রয়োজন হতে পারে।
 
-### Payment Lifecycle
+### পেমেন্টের জীবনচক্র
 
 ```mermaid
 stateDiagram-v2
@@ -520,9 +520,9 @@ stateDiagram-v2
 
 `REFUND_PENDING` may return to `PAID` if a refund definitively fails and the payment remains captured. Such recovery must be based on the gateway's verified result.
 
-### Why Separate These Statuses?
+### এই স্ট্যাটাসগুলো আলাদা কেন?
 
-An order and its payment represent different business processes.
+অর্ডার এবং তার payment দুটি আলাদা business process নির্দেশ করে।
 
 Example:
 
