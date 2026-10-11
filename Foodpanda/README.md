@@ -1,14 +1,14 @@
-# Food Delivery System Design — Foodpanda
+# ফুড ডেলিভারি সিস্টেম ডিজাইন — Foodpanda
 
-A system design project for building a food delivery platform similar to Foodpanda for a city like Dhaka, Bangladesh.
+বাংলাদেশের ঢাকার মতো একটি শহরের জন্য Foodpanda-এর মতো ফুড ডেলিভারি প্ল্যাটফর্ম তৈরির সিস্টেম ডিজাইন প্রকল্প।
 
-**Difficulty:** Easy to Medium  
-**Target Role:** Junior Software Engineer / Software Engineer Intern  
-**Focus:** Order Management, Database Transactions, ACID Properties, Payment Processing, Rider Assignment, Concurrency Control, and System Reliability
+**কঠিনতার স্তর:** সহজ থেকে মাঝারি  
+**লক্ষ্য ভূমিকা:** জুনিয়র সফটওয়্যার ইঞ্জিনিয়ার / সফটওয়্যার ইঞ্জিনিয়ার ইন্টার্ন  
+**মূল বিষয়:** অর্ডার ব্যবস্থাপনা, ডেটাবেস ট্রানজ্যাকশন, ACID বৈশিষ্ট্য, পেমেন্ট প্রসেসিং, রাইডার অ্যাসাইনমেন্ট, কনকারেন্সি কন্ট্রোল এবং সিস্টেম নির্ভরযোগ্যতা
 
 ---
 
-## Table of Contents
+## সূচিপত্র
 
 1. [Problem Statement](#1-problem-statement)
 2. [Requirements](#2-requirements)
@@ -33,7 +33,7 @@ A system design project for building a food delivery platform similar to Foodpan
 
 ---
 
-## 1. Problem Statement
+## ১. সমস্যার বিবরণ
 
 Design a food delivery platform similar to Foodpanda that allows customers to browse restaurants, order food, pay online, and receive deliveries from riders.
 
@@ -54,7 +54,7 @@ It must also handle payment failures, restaurant rejection, rider unavailability
 
 ---
 
-## 2. Requirements
+## ২. প্রয়োজনীয়তা
 
 ### 2.1 Functional Requirements
 
@@ -92,7 +92,7 @@ It must also handle payment failures, restaurant rejection, rider unavailability
 
 ---
 
-## 3. High-Level Architecture
+## ৩. উচ্চ-স্তরের আর্কিটেকচার
 
 The system can initially be implemented as a modular monolith. Separate services can be introduced when traffic and operational requirements justify them.
 
@@ -163,6 +163,27 @@ In an interview, explain the design from the user's screen toward the backend an
 
 #### A. Frontend Architecture
 
+```mermaid
+flowchart LR
+    UI[Customer UI]
+    STATE[Local UI State]
+    SERVER[Server State / Query Cache]
+    AUTH[Auth and Session Store]
+    API[API Client]
+    TRACK[Polling or WebSocket Client]
+
+    UI --> STATE
+    UI --> SERVER
+    UI --> AUTH
+    STATE --> API
+    SERVER --> API
+    AUTH --> API
+    API --> TRACK
+    TRACK --> UI
+```
+
+The customer client can be a React web app or a mobile app with the same logical layers. Restaurant and rider clients reuse the API and authentication layers but expose role-specific screens and actions.
+
 The platform has three primary clients:
 
 | Client | Main screens | Main responsibilities |
@@ -189,6 +210,43 @@ Frontend rules that matter in the interview:
 - Use polling initially for order tracking; introduce WebSockets or server-sent events when real-time updates justify the operational cost.
 
 #### B. Backend Architecture
+
+```mermaid
+flowchart TB
+    CLIENTS[Customer, Restaurant, Rider, Admin Clients]
+    GATEWAY[API Gateway / Load Balancer]
+    AUTH[Auth and RBAC]
+    CATALOG[Restaurant and Menu]
+    CART[Cart and Checkout]
+    ORDER[Order Management]
+    PAYMENT[Payment and Refund]
+    DISPATCH[Dispatch and Rider]
+    NOTIFY[Notification]
+    DB[(PostgreSQL)]
+    CACHE[(Redis)]
+    OUTBOX[(Outbox / Job Table)]
+    QUEUE[Queue and Workers]
+    GATEWAY --> AUTH
+    GATEWAY --> CATALOG
+    GATEWAY --> CART
+    GATEWAY --> ORDER
+    GATEWAY --> PAYMENT
+    GATEWAY --> DISPATCH
+    AUTH --> DB
+    CATALOG --> DB
+    CATALOG --> CACHE
+    CART --> DB
+    ORDER --> DB
+    PAYMENT --> DB
+    DISPATCH --> DB
+    ORDER --> OUTBOX
+    PAYMENT --> OUTBOX
+    DISPATCH --> OUTBOX
+    OUTBOX --> QUEUE
+    QUEUE --> NOTIFY
+```
+
+For the first release, these modules run inside one backend application. They should still have separate responsibilities so payment, dispatch, or notification can later be extracted without redesigning the entire system.
 
 Start with a modular monolith. The modules share one relational database but have clear ownership boundaries:
 
@@ -277,7 +335,7 @@ The key interview trade-off is consistency versus availability: browsing can tol
 
 ---
 
-## 4. Database Design
+## ৪. ডেটাবেস ডিজাইন
 
 A relational database such as PostgreSQL or MySQL is a good choice because orders, order items, payments, and rider assignments require reliable relationships and transactional updates.
 
@@ -423,7 +481,7 @@ A refund should have its own status and idempotency key. A unique key prevents t
 
 ---
 
-## 5. Status Management
+## ৫. স্ট্যাটাস ব্যবস্থাপনা
 
 ### Order Lifecycle
 
@@ -475,7 +533,7 @@ This means the restaurant rejected the order, but the refund has not yet been co
 
 ---
 
-## 6. ER Diagram
+## ৬. ER ডায়াগ্রাম
 
 ```mermaid
 erDiagram
@@ -559,7 +617,7 @@ The exact cardinalities depend on business policy. For example, an order may hav
 
 ---
 
-## 7. REST API Design
+## ৭. REST API ডিজাইন
 
 ### Authentication
 
@@ -643,7 +701,7 @@ If the same customer retries with the same key and the same request, the backend
 
 ---
 
-## 8. Complete Order Flow
+## ৮. সম্পূর্ণ অর্ডার প্রবাহ
 
 ### Step 1: Customer Places an Order
 
@@ -694,7 +752,7 @@ The system records delivery completion and makes the final order and payment his
 
 ---
 
-## 9. Duplicate Order and Rider Assignment Prevention
+## ৯. ডুপ্লিকেট অর্ডার ও রাইডার অ্যাসাইনমেন্ট প্রতিরোধ
 
 ### 9.1 Prevent Duplicate Orders
 
@@ -748,7 +806,7 @@ The application validates the current status before assigning the rider.
 
 ---
 
-## 10. Payment and Order Expiry Mechanism
+## ১০. পেমেন্ট ও অর্ডারের মেয়াদ শেষ হওয়ার ব্যবস্থা
 
 A food delivery system may expire unpaid orders after a configurable time limit.
 
@@ -780,7 +838,7 @@ Do not assume that cancelling an order automatically cancels an in-flight paymen
 
 ---
 
-## 11. Payment Failure and Delayed Webhooks
+## ১১. পেমেন্ট ব্যর্থতা ও বিলম্বিত ওয়েবহুক
 
 ### Scenario A: Payment Fails
 
@@ -843,7 +901,7 @@ The database transaction cannot atomically commit with an external payment gatew
 
 ---
 
-## 12. Database Transactions
+## ১২. ডেটাবেস ট্রানজ্যাকশন
 
 ### Example: Creating an Order
 
@@ -907,7 +965,7 @@ Do not keep a database transaction open while waiting for a slow external HTTP r
 
 ---
 
-## 13. ACID Properties
+## ১৩. ACID বৈশিষ্ট্য
 
 ACID stands for Atomicity, Consistency, Isolation, and Durability.
 
@@ -966,7 +1024,7 @@ Use verified gateway events, idempotent operations, durable job records, retries
 
 ---
 
-## 14. Security and Reliability
+## ১৪. নিরাপত্তা ও নির্ভরযোগ্যতা
 
 ### Authentication and Authorization
 
@@ -998,7 +1056,7 @@ Use verified gateway events, idempotent operations, durable job records, retries
 
 ---
 
-## 15. Scalability and Performance
+## ১৫. স্কেলযোগ্যতা ও পারফরম্যান্স
 
 ### Database Optimization
 
@@ -1039,7 +1097,7 @@ Start with a modular monolith and a relational database. Add caching, background
 
 ---
 
-## 16. Test Cases
+## ১৬. টেস্ট কেস
 
 | # | Scenario | Expected Result |
 |---|---|---|
@@ -1070,7 +1128,7 @@ Verify that exactly one active assignment exists after both requests finish.
 
 ---
 
-## 17. Implementation Plan
+## ১৭. বাস্তবায়ন পরিকল্পনা
 
 ### Phase 1: Core Database and API
 
@@ -1112,7 +1170,7 @@ Verify that exactly one active assignment exists after both requests finish.
 
 ---
 
-## 18. Short Interview Answers
+## ১৮. সংক্ষিপ্ত ইন্টারভিউ উত্তর
 
 ### Q1. Why use PostgreSQL or MySQL?
 
@@ -1176,7 +1234,7 @@ It stores a business update and the event to publish in the same database transa
 
 ---
 
-## 19. Final Interview Checklist
+## ১৯. চূড়ান্ত ইন্টারভিউ চেকলিস্ট
 
 Before the interview, make sure you can explain:
 
@@ -1200,7 +1258,7 @@ Before the interview, make sure you can explain:
 
 ---
 
-## 20. Future Improvements
+## ২০. ভবিষ্যৎ উন্নয়ন
 
 Possible extensions for a production-grade platform include:
 
