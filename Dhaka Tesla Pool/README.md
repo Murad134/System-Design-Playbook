@@ -1,0 +1,854 @@
+# Dhaka Tesla Pool
+
+Dhaka Tesla Pool হলো Dhaka-ভিত্তিক full-stack ride-pooling system। এটি compatible zone-এর মধ্যে fixed-capacity Tesla ride ভাগ করে এবং passenger booking, driver matching, fare, payment, ১০ মিনিটের ticket hold, coin reward ও ride lifecycle পরিচালনা করে।
+
+## Live Deployment
+
+- Frontend: https://frontend-dhaka-tesla-pool.vercel.app
+- Backend: https://backend-dhaka-tesla-pool.vercel.app
+- Health check: https://backend-dhaka-tesla-pool.vercel.app/health
+
+The frontend and backend are deployed as separate Vercel projects. PostgreSQL is hosted separately and is accessed by Prisma from the backend function.
+
+## Zones & Matching Rule
+
+The predefined zones are:
+
+- Banani
+- Gulshan 1
+- Gulshan 2
+- Mohakhali
+- Dhanmondi
+- Mirpur
+- Uttara
+- Farmgate
+- Bashundhara
+
+Two rides can be pooled when they have the same pickup zone and compatible destination corridors. Different pickup zones can also match only when both routes are registered compatible corridors and the destinations overlap, meet at a pickup zone, or otherwise satisfy the corridor rule in `backend/src/utils/zones.js`. This is route-corridor matching, not live map-based routing.
+
+## Features
+
+### মূল সুবিধা
+
+- **[Reported]** Passenger ও driver registration/login
+- **[Reported]** Driver online/offline status এবং ownership check
+- **[Reported]** Seat count, fare ও payment method-সহ ride request
+- **[Planned]** Ticket booking তৈরি হলে database time-ভিত্তিক সর্বোচ্চ ১০ মিনিটের seat hold
+- **[Reported/needs verification]** Pool capacity ও concurrent booking protection
+- **[Planned]** bKash/card payment attempt, signed webhook, refund state ও reconciliation
+- **[Planned]** Ride completion-এর পরে coin reward, CoinJob এবং append-only coin ledger
+- **[Reported/needs verification]** Fare calculation in poysha with pool discount
+- **[Reported/needs verification]** Predefined Dhaka zone-এর route compatibility matching
+- **[Reported/needs verification]** Ride status transitions:
+  `REQUESTED -> MATCHED -> DRIVER_ARRIVED -> STARTED -> COMPLETED`
+- **[Reported/needs verification]** Ride cancellation এবং ride history
+- **[Planned]** Serializable capacity transaction, bounded retry এবং scoped idempotency key
+- **[Planned]** Expired hold, outbox dispatch এবং coin settlement worker
+- **[Reported/needs verification]** API health endpoint এবং database connectivity status
+
+### Implementation status
+
+এই workspace snapshot-এ `README.md` ছাড়া backend source, Prisma schema, migration, route বা test file দেখা যাচ্ছে না। তাই নিচের booking, payment, refund, coin এবং worker design-গুলো **Proposed/Planned**; এগুলো implemented বলে ধরে production deploy করা যাবে না। কোনো endpoint বা status `Verified` বলার আগে route, service, schema, migration এবং test দিয়ে মিলিয়ে নিতে হবে।
+
+| Domain | বর্তমান documentation status | Implemented বলার প্রমাণ |
+| --- | --- | --- |
+| Authentication, ride, pool | Reported from previous project description; source verification pending | route + middleware + test |
+| Ticket booking ও ১০ মিনিট hold | **Planned** | booking service, migration, expiry test |
+| Payment, webhook ও refund | **Planned** | payment-attempt schema, provider adapter, webhook/refund tests |
+| CoinWallet, CoinLedger ও CoinJob | **Planned** | worker, outbox migration, reconciliation test |
+| Vercel Cron/worker delivery | **Planned** | deployed `vercel.json`/Cron config ও delivery monitoring |
+
+## Architecture
+
+এই system-এর architecture তিনটি স্তরে দেখা যায়: frontend user experience, backend business service এবং end-to-end deployment flow। Pool-এর available seat কেবল backend transaction হিসাব করবে; frontend-এর countdown কখনও seat availability নির্ধারণ করবে না।
+
+### ১. Frontend Architecture
+
+```mermaid
+flowchart TD
+  Browser[Passenger / Driver Browser] --> App[Next.js App Router]
+  App --> Pages[Booking, Payment, Ride, Driver Pages]
+  App --> Components[Reusable UI Components]
+  App --> AuthContext[Auth Context + JWT]
+  App --> State[Booking State + 10-minute Countdown]
+  App --> CoinView[Coin Balance + Reward History]
+  Pages --> ApiClient[API Client]
+  AuthContext --> ApiClient
+  State --> ApiClient
+  CoinView --> ApiClient
+  ApiClient -->|HTTPS REST + JWT + Idempotency-Key| Backend[Express Backend]
+  Pages -->|display only| Timer[expiresAt from server]
+  Backend -->|booking/payment status| ApiClient
+```
+
+**Frontend নিয়ম:** booking তৈরির পরে API থেকে পাওয়া `expiresAt` দিয়ে countdown দেখাবে। Payment button retry করলে একই `Idempotency-Key` ব্যবহার করবে। Countdown শূন্য হলে UI payment বন্ধ করতে পারে, কিন্তু final decision backend-এর `HELD`/`EXPIRED` status থেকে আসবে।
+
+### ২. Backend Architecture
+
+```mermaid
+flowchart TD
+  Request[HTTP Request] --> Middleware[Helmet, CORS, JWT, RBAC, Validation]
+  Middleware --> Controllers[REST Controllers]
+  Controllers --> BookingService[Booking Service]
+  Controllers --> PaymentService[Payment Service]
+  Controllers --> PoolService[Pool Matching + Capacity Service]
+  Controllers --> RideService[Ride State Service]
+  Controllers --> CoinService[Coin Wallet + Ledger Service]
+  BookingService --> Tx[Prisma Serializable Transaction]
+  PaymentService --> Tx
+  PoolService --> Tx
+  RideService --> Tx
+  CoinService --> Tx
+  Tx --> PostgreSQL[(PostgreSQL)]
+  PaymentService --> Gateway[bKash / Card Gateway]
+  Gateway --> Webhook[Signed Payment Webhook]
+  Webhook --> PaymentService
+  Tx --> Outbox[OutboxEvent]
+  Outbox --> Worker[Scheduled Worker]
+  Worker --> Expire[Expire HELD bookings]
+  Worker --> CoinJob[Create / Process CoinJob]
+  CoinJob --> CoinTx[Wallet + CoinLedger transaction]
+  Expire --> Tx
+  CoinTx --> Tx
+```
+
+**Backend নিয়ম:** controller validation-এর পরে service layer-এ যাবে। Booking service একই transaction-এ pool seat reserve, ticket hold, payment intent এবং outbox event লিখবে। Payment success কেবল signed webhook-এর পরে হবে; browser redirect-কে trusted result ধরা হবে না।
+
+### ৩. Full System Architecture
+
+```mermaid
+flowchart LR
+  Passenger[Passenger Web/Mobile UI] --> FE[Next.js Frontend]
+  Driver[Driver UI] --> FE
+  FE -->|HTTPS REST + JWT + Idempotency-Key| API[Express API]
+  API --> Auth[Auth / RBAC / validation]
+  Auth --> Booking[Booking service]
+  Auth --> Match[Matching and capacity service]
+  Auth --> Pay[Payment service]
+  Auth --> Coin[Coin service]
+  Booking --> TX[(Serializable PostgreSQL transaction)]
+  Match --> TX
+  Pay --> TX
+  Coin --> TX
+  TX --> DB[(PostgreSQL)]
+  Pay --> Gateway[bKash / Card Gateway]
+  Gateway -->|signed webhook| API
+  RideCompleted[Ride COMPLETED event] --> Queue
+  Scheduler[Scheduler: প্রতি ১ মিনিটে] --> Worker[Job worker]
+  Worker -->|expire holds / settle coins| TX
+  API --> Queue[(Outbox / Job queue)]
+  Queue --> Worker
+  API --> Logs[Audit logs and monitoring]
+```
+
+**Full flow-এর সারাংশ:** Passenger বা driver frontend থেকে request পাঠায়, backend transaction দিয়ে pool-এর seat hold করে, payment gateway payment নেয়, webhook booking confirm করে এবং worker expiry বা coin reward process করে। PostgreSQL booking, seat, payment এবং coin-এর একমাত্র সত্য উৎস।
+
+### বাংলা পূর্ণ আর্কিটেকচার
+
+**Frontend:** Next.js App Router-এর passenger ও driver dashboard, booking form, ১০ মিনিটের countdown, payment screen, booking status, coin balance/reward history এবং retry-safe API client থাকবে। Frontend শুধু coin job-এর ফলাফল দেখাবে; coin যোগ করার job frontend-এ চলবে না। Countdown শুধু UI feedback; hold-এর আসল expiry সবসময় server-এর `expiresAt` দিয়ে যাচাই হবে।
+
+**Backend:** Express API-তে Auth/RBAC, request validation, booking, matching, fare, payment, coin এবং ride-state service আলাদা থাকবে। Controller সরাসরি balance বা seat update করবে না; domain service transaction-এর মধ্যে সেই কাজ করবে।
+
+**Database:** PostgreSQL হলো source of truth। Fare/coin/poysha integer হিসেবে রাখা হবে। Provider-scoped payment ID, webhook event ID, operation-scoped idempotency key, `TicketBooking.bookingCode` এবং coin reward reference duplicate request ঠেকাবে।
+
+**External integration:** Payment gateway-তে authorization/charge পাঠানোর আগে local payment intent তৈরি হবে। Gateway webhook signature যাচাই করে idempotentভাবে payment update করবে; browser redirect কখনও payment success-এর source of truth নয়।
+
+**Worker:** প্রতি এক মিনিটে `EXPIRED` হওয়ার সময় পার হওয়া `HELD` booking lock করে seat release করবে। `RIDE_COMPLETED` event থেকে `CoinJob` তৈরি করে reward হিসাব, wallet balance এবং `CoinLedger` একই transaction-এ update করবে। Job পুনরায় চললেও unique key-এর কারণে duplicate coin হবে না।
+
+Preview-safe architecture map:
+
+```text
+Passenger / Driver
+        |
+        | REST requests + JWT
+        v
+Next.js Web App
+        |
+        v
+Express REST API
+        |
+        +--> Auth / ownership middleware
+        |
+        +--> Controllers
+                |
+                +--> Pool matcher
+                +--> Fare calculator
+                +--> Ride state machine
+                +--> Prisma ORM
+                        |
+                        v
+                  PostgreSQL database
+```
+
+### Request এবং matching flow
+
+1. Frontend authenticated ride request বা driver action Express API-তে পাঠায়।
+2. Controller data পরিবর্তনের আগে authentication, ownership এবং request validation middleware চালায়।
+3. Operation অনুযায়ী fare calculator, route-corridor matcher এবং ride state machine ব্যবহার হয়।
+4. Pool acceptance Prisma `Serializable` transaction-এর মধ্যে route compatibility যাচাই, Tesla capacity lock, active pool seat count এবং assignment একসঙ্গে সম্পন্ন করে।
+5. PostgreSQL ride status, pool membership, seat usage, payment state, ticket hold, coin ledger এবং audit history-এর source of truth।
+
+### Ticket booking এবং ১০ মিনিটের hold flow
+
+1. Passenger `POST /api/bookings` করলে backend একই transaction-এর মধ্যে PostgreSQL-এর `CURRENT_TIMESTAMP` ব্যবহার করে `expiresAt = database_time + INTERVAL '10 minutes'` নির্ধারণ করবে। Application server-এর clock বা frontend clock authoritative নয়।
+2. একই transaction-এ capacity aggregate lock করে confirmed seat এবং `expiresAt > CURRENT_TIMESTAMP` থাকা `HELD` seat count করবে। Capacity যথেষ্ট হলে `TicketBooking=HELD`, reserved seat, payment attempt এবং outbox event একসঙ্গে লিখবে।
+3. Passenger ১০ মিনিটের মধ্যে payment করলে confirmation transaction আবার database time দিয়ে `status = HELD` এবং `expiresAt > CURRENT_TIMESTAMP` যাচাই করবে। শর্ত সত্য হলে booking `CONFIRMED` হবে।
+4. Expiry worker একই row lock নিয়ে `status = HELD` এবং `expiresAt <= CURRENT_TIMESTAMP` শর্তে booking `EXPIRED` করবে এবং seat release করবে।
+5. Payment capture expiry-এর পরে হয়ে গেলে booking confirm করা যাবে না; capture record রেখে refund/reconciliation শুরু করতে হবে। Confirmed booking cancel হলে আলাদা refund state machine চলবে।
+
+#### Pool seat হিসাব
+
+প্রতিটি pool-এর জন্য:
+
+```text
+availableSeats = poolCapacitySeats - confirmedSeats - activeHeldSeats
+activeHeldSeats = HELD booking-এর seats,
+          যেখানে expiresAt > database CURRENT_TIMESTAMP
+```
+
+`POST /api/bookings` transaction `availableSeats >= requestedSeats` যাচাই করে। যাচাই সফল হলে সেই seat ১০ মিনিটের জন্য `HELD` হয় এবং অন্য passenger সেটি book করতে পারে না। Payment সফল হলে একই booking `CONFIRMED` হয়; payment না হলে expiry job `HELD -> EXPIRED` করে এবং seat আবার `availableSeats`-এ ফিরে আসে। Aggregate capacity enforce করার জন্য শুধু unique index বা `CHECK` constraint যথেষ্ট নয়; একই pool-এর capacity row/aggregate অবশ্যই serialize করতে হবে।
+
+```mermaid
+stateDiagram-v2
+  [*] --> HELD: seat reserve
+  HELD --> CONFIRMED: payment webhook success
+  HELD --> EXPIRED: 10 minutes শেষ / worker
+  HELD --> CANCELLED: passenger cancel
+  CONFIRMED --> CANCELLED: cancellation + refund policy
+  CONFIRMED --> COMPLETED: ride completed
+  EXPIRED --> [*]: seat release
+  CANCELLED --> [*]: seat release
+```
+
+Payment webhook এবং expiry worker একই booking row lock করবে। Confirmation-এর শর্ত হবে `status = HELD AND expiresAt > CURRENT_TIMESTAMP`; expiry-এর শর্ত হবে `status = HELD AND expiresAt <= CURRENT_TIMESTAMP`। তাই payment ঠিক expiry মুহূর্তে এলেও database-এ `CONFIRMED` অথবা `EXPIRED` একটি মাত্র final state থাকবে। Expired booking-এর পরে provider capture report এলে `409 BOOKING_EXPIRED` দিয়ে money capture record, refund এবং reconciliation queue করতে হবে।
+
+### ACID transaction নীতি
+
+- **Atomicity:** booking, seat reservation, payment intent এবং outbox event একই transaction-এ commit হবে; যেকোনো error হলে সব rollback।
+- **Consistency:** foreign key, enum state transition, non-negative seat/coin balance এবং payment amount/currency validation বজায় থাকবে। Aggregate capacity শুধু unique index বা `CHECK` দিয়ে enforce করা হবে না; service transaction-এ count ও reserve একসঙ্গে হবে।
+- **Isolation:** একই `Pool` capacity aggregate-এর booking/matching transaction serialize হবে। Prisma `Serializable` বা locked capacity row ব্যবহার হবে; শুধু transient serialization/deadlock error bounded limit পর্যন্ত retry হবে।
+- **Durability:** PostgreSQL commit-এর পরে booking/payment state টিকে থাকবে; external gateway-এর ফল webhook ও audit record-এ রাখা হবে।
+
+#### Interview-wise transaction flow
+
+Passenger যখন ২টি seat book করে, backend-এর transaction এই ক্রমে কাজ করবে:
+
+1. `Idempotency-Key` দেখে একই request আগে process হয়েছে কি না যাচাই করবে।
+2. একই `Pool`-এর capacity aggregate row lock বা `Serializable` isolation-এর মাধ্যমে concurrent request নিয়ন্ত্রণ করবে।
+3. Database `CURRENT_TIMESTAMP` দিয়ে `confirmedSeats + unexpiredHeldSeats` count করে `availableSeats >= requestedSeats` যাচাই করবে।
+4. `TicketBooking=HELD`, database-calculated `expiresAt`, reserved seat এবং `PaymentAttempt=REQUIRES_PAYMENT` একই transaction-এ লিখবে।
+5. `BookingHeld` outbox event লিখে commit করবে। যেকোনো ধাপে error হলে booking, seat এবং payment intent একসঙ্গে rollback হবে।
+6. Payment gateway call database transaction-এর ভিতরে অপেক্ষা করে করা হবে না। Local payment intent commit হওয়ার পরে gateway call হবে; gateway-এর signed webhook নতুন ছোট transaction-এ `Payment=SUCCEEDED` এবং `TicketBooking=CONFIRMED` করবে।
+7. PostgreSQL serialization failure বা deadlock হলে পুরো transaction নতুন করে retry হবে; একই `Idempotency-Key` থাকায় duplicate booking হবে না।
+
+#### Race condition: payment বনাম expiry
+
+Payment webhook এবং expiry worker একই booking-এর final state বদলাতে পারে। দুজনেই row lock নেবে এবং status শর্তসহ update করবে:
+
+```sql
+UPDATE ticket_booking
+SET status = 'CONFIRMED', confirmed_at = CURRENT_TIMESTAMP
+WHERE id = $1
+  AND status = 'HELD'
+  AND expires_at > CURRENT_TIMESTAMP;
+```
+
+Expiry update-এ একইভাবে `status = 'HELD' AND expires_at <= CURRENT_TIMESTAMP` থাকবে। যে transaction আগে lock পাবে সেটিই state পরিবর্তন করবে। পরে আসা transaction-এর affected row count `0` হলে backend বুঝবে booking আর active নয়। Provider ইতিমধ্যে money capture করেছে জানালে payment attempt-টি `REFUND_PENDING` হবে এবং refund/reconciliation flow শুরু হবে; blind success বা silent loss হবে না।
+
+### Payment এবং refund state machine
+
+Booking state এবং payment-attempt state আলাদা রাখতে হবে। একটি booking `HELD`, `CONFIRMED`, `EXPIRED` বা `CANCELLED` হতে পারে; payment attempt আলাদাভাবে নিচের state-গুলো অনুসরণ করবে:
+
+```mermaid
+stateDiagram-v2
+  [*] --> REQUIRES_PAYMENT
+  REQUIRES_PAYMENT --> PROCESSING: provider request sent
+  PROCESSING --> SUCCEEDED: verified provider success
+  PROCESSING --> FAILED: verified provider failure
+  SUCCEEDED --> REFUND_PENDING: refund requested
+  REFUND_PENDING --> REFUNDED: verified provider refund
+  REFUND_PENDING --> REFUND_FAILED: provider failure / timeout
+  REFUND_FAILED --> REFUND_PENDING: reconciliation retry
+```
+
+- External gateway call কখনও open database transaction-এর ভিতরে রাখা যাবে না। Local payment attempt আগে commit হবে; provider result signed webhook বা verified reconciliation job-এর মাধ্যমে persist হবে।
+- `REFUNDED` status শুধু provider-এর verified refund confirmation-এর পরে দেওয়া যাবে। Timeout মানেই refund success নয়।
+- Expiry-এর পরে capture হলে `PaymentAttempt=SUCCEEDED` record করে booking confirm না করে `REFUND_PENDING` ও reconciliation task তৈরি করতে হবে।
+
+### Idempotency এবং webhook security
+
+- Idempotency key শুধু global unique নয়; user + operation + route বা provider account scope-এ রাখতে হবে। একই key-তে ভিন্ন request body এলে `409 IDEMPOTENCY_PAYLOAD_MISMATCH` দিতে হবে।
+- Payment create, confirmation, refund request এবং coin reward-এর জন্য আলাদা operation-scoped key ব্যবহার করতে হবে।
+- Webhook signature, provider transaction ID, amount, currency, merchant/provider account এবং event timestamp যাচাই না করে কোনো state update করা যাবে না।
+- `provider + providerAccount + providerPaymentId` এবং `provider + providerAccount + webhookEventId` unique করে duplicate payment/webhook আটকাতে হবে।
+- Refund request-ও idempotent হবে; একই refund key-তে ভিন্ন amount বা currency এলে reject হবে।
+
+#### ACID interview questions এবং model answers
+
+**প্রশ্ন ১: এই system-এ ACID কেন দরকার?**  
+একই Tesla pool-এর শেষ seat একাধিক passenger একই সময়ে চাইতে পারে। Atomicity ও isolation ছাড়া দুজনই seat পেয়ে যেতে পারে, payment ও booking state আলাদা হয়ে যেতে পারে, এবং overbooking হবে।
+
+**প্রশ্ন ২: Atomicity কীভাবে প্রয়োগ করেছেন?**  
+Seat reserve, `TicketBooking=HELD`, payment intent, এবং outbox event একই PostgreSQL transaction-এ রাখা হয়েছে। যেকোনো validation বা constraint error হলে সব পরিবর্তন rollback হয়।
+
+**প্রশ্ন ৩: Consistency কী কী rule দিয়ে নিশ্চিত হয়?**  
+Foreign key, enum-based state transition, positive seat count, capacity check, unique `bookingCode`, unique `idempotencyKey`, এবং coin ledger reference uniqueness consistency বজায় রাখে। Business rule শুধু controller-এ নয়, database constraint ও service layer দু জায়গায় enforce করা হয়।
+
+**প্রশ্ন ৪: Serializable isolation কেন ব্যবহার করেছেন?**  
+দুটি concurrent booking যেন একই available seat পড়ে নিয়ে দুটোই reserve করতে না পারে, তাই booking/matching-এর critical transaction-এ `Serializable` ব্যবহার করা হয়েছে। Conflict হলে PostgreSQL একটি transaction abort করবে; backend bounded retry করবে।
+
+**প্রশ্ন ৫: শুধু frontend countdown দিয়ে seat release করা যাবে?**  
+না। Frontend বন্ধ হয়ে যেতে পারে, clock ভুল হতে পারে, বা request হারাতে পারে। Server-এর `expiresAt` এবং scheduled expiry worker authoritative; frontend countdown শুধু user feedback।
+
+**প্রশ্ন ৬: Payment gateway call database transaction-এর ভিতরে রাখেননি কেন?**  
+Gateway network call ধীর বা unavailable হতে পারে। দীর্ঘ transaction lock রাখলে database contention ও deadlock বাড়বে। তাই local payment intent আগে commit হয় এবং signed webhook পরে idempotent transaction-এ final payment state update করে।
+
+**প্রশ্ন ৭: Payment webhook দুইবার এলে কী হবে?**  
+Provider, provider account এবং provider payment/event ID scoped unique হওয়ায় দ্বিতীয় webhook নতুন charge বা booking তৈরি করবে না। Backend আগের payment result ফেরত দেবে এবং একই final state পুনরায় apply করবে না।
+
+**প্রশ্ন ৮: Payment ঠিক ১০ মিনিটের সময় এলে কীভাবে সিদ্ধান্ত হবে?**  
+Payment confirmation এবং expiry worker একই row lock নেয়। যে transaction আগে valid status update করে commit করবে, সেটিই জিতবে। `expiresAt` শর্তের কারণে expiry হয়ে গেলে পরে payment confirmation গ্রহণ করা হবে না।
+
+**প্রশ্ন ৯: Outbox pattern কেন ব্যবহার করেছেন?**  
+Database commit সফল হলেও event publish ব্যর্থ হলে coin job বা notification হারিয়ে যেতে পারে। Outbox event booking transaction-এর সঙ্গে commit হয়; worker pending event retry করে, তাই eventual processing এবং audit দুটোই পাওয়া যায়।
+
+**প্রশ্ন ১০: Coin দুইবার যোগ হওয়া কীভাবে আটকাবেন?**  
+`CoinLedger`-এ `referenceType + referenceId + entryType` unique constraint থাকবে। Worker retry করলেও একই `RIDE_COMPLETED` event-এর দ্বিতীয় credit insert হবে না; wallet balance এবং ledger update একই transaction-এ হবে।
+
+**প্রশ্ন ১১: Serializable transaction বারবার fail করলে কী করবেন?**  
+শুধু transient serialization/deadlock error bounded exponential backoff-এ retry করব। কয়েকবার retry-এর পর `409 BOOKING_CONFLICT` দেব, metrics/log রাখব এবং client-কে নতুন availability fetch করতে বলব। সব error blindly retry করব না।
+
+**প্রশ্ন ১২: Durability কীভাবে নিশ্চিত হয়?**  
+PostgreSQL commit-এর পরে booking/payment state durable থাকে। External gateway-এর response নয়, signed webhook-এর persisted result system-এর source of truth; backup, WAL এবং managed PostgreSQL durability বাড়ায়।
+
+### Coin job
+
+`RIDE_COMPLETED` এবং তার `OutboxEvent` একই database transaction-এ লেখা হবে। Worker outbox event claim করে একটি `CoinJob` তৈরি/প্রক্রিয়া করবে। Job passenger-এর reward হিসাব করে `CoinLedger(CREDIT)` insert এবং wallet balance update করবে। Event ID এবং reward reference unique হওয়ায় retry বা duplicate event-এ দ্বিতীয়বার coin যোগ হবে না। Fraud review, expiry এবং manual adjustment-এর জন্য ledger append-only থাকবে; balance cached হলেও ledger-ই হিসাবের source of truth।
+
+#### CoinJob lifecycle
+
+```text
+RIDE_COMPLETED
+  |
+  v
+OutboxEvent(PENDING)
+  |
+  v
+CoinJob(PENDING) -> PROCESSING -> COMPLETED
+         |
+         +---- lease timeout -> PENDING retry
+         +---- transient failure -> PENDING retry (bounded)
+         +---- permanent failure/max attempts -> FAILED + alert
+  |
+  v
+CoinWallet + CoinLedger(CREDIT)
+```
+
+#### CoinJob database design
+
+| Table | প্রয়োজনীয় field | দায়িত্ব |
+| --- | --- | --- |
+| `CoinJob` | `id`, `eventId`, `userId`, `jobType`, `idempotencyKey`, `status`, `attempts`, `maxAttempts`, `leaseOwner`, `leaseUntil`, `runAt`, `lastError`, `completedAt` | কোন reward job কখন চলেছে, lease/retry হয়েছে কি না এবং failure audit রাখা |
+| `CoinWallet` | `id`, `userId UNIQUE`, `balance`, `updatedAt` | দ্রুত বর্তমান coin balance দেখানো; এটি cached projection |
+| `CoinLedger` | `id`, `walletId`, `amount`, `entryType`, `referenceType`, `referenceId`, `createdAt` | প্রতিটি credit/debit-এর append-only হিসাব |
+| `OutboxEvent` | `id`, `eventType`, `aggregateId`, `payload`, `status`, `availableAt`, `processedAt` | ride completion event হারিয়ে না যাওয়া এবং worker retry |
+
+`OutboxEvent.eventId`/primary key, `CoinJob(eventId, jobType)` এবং `CoinLedger(referenceType, referenceId, entryType)` unique থাকবে। Worker claim করার সময় `leaseOwner` ও `leaseUntil` লিখবে; lease শেষ হলে অন্য worker job reclaim করতে পারবে। `CoinJob` processing transaction-এ wallet row lock করে ledger insert এবং balance update করবে। Ledger insert আগে থেকেই থাকলে job-টি duplicate reward না দিয়ে `COMPLETED` হবে। `maxAttempts` পার হলে `FAILED` record, alert এবং reconciliation queue তৈরি হবে। Reconciliation job outbox, job, ledger ও wallet balance মিলিয়ে missing বা duplicate effect report করবে; নিজে silent correction করবে না।
+
+#### Coin reward-এর interview questions
+
+**প্রশ্ন ১: Coin reward synchronous না asynchronous কেন?**  
+Ride complete করার API-কে coin calculation, wallet lock বা reward provider-এর জন্য অপেক্ষা করানো দরকার নেই। Outbox ও worker ব্যবহার করলে ride completion দ্রুত commit হয় এবং reward আলাদাভাবে retry করা যায়।
+
+**প্রশ্ন ২: CoinJob কীভাবে তৈরি হয়?**  
+`Ride.status` সফলভাবে `COMPLETED` হওয়ার একই database transaction-এ `RIDE_COMPLETED` outbox event লেখা হয়। Worker event claim করে `CoinJob` তৈরি করে; event আগে process হয়ে থাকলে unique key duplicate job আটকায়।
+
+**প্রশ্ন ৩: Worker crash করলে coin হারাবে কি?**  
+না। Outbox event ও job database-এ durable থাকে। Worker `PROCESSING` job-এর lease/timeout দেখে আবার `PENDING` করতে পারে। পরের retry idempotency key যাচাই করে reward সম্পন্ন করবে।
+
+**প্রশ্ন ৪: Coin duplicate হওয়ার সবচেয়ে বড় ঝুঁকি কোথায়?**  
+Worker একই event দুইবার পেতে পারে, network response হারিয়ে retry হতে পারে, অথবা process crash-এর পরে transaction commit হয়েছে কি না জানা নাও থাকতে পারে। তাই application check-এর পাশাপাশি database unique constraint বাধ্যতামূলক।
+
+**প্রশ্ন ৫: Wallet balance এবং ledger কীভাবে update করবেন?**  
+একটি ছোট transaction-এ wallet row lock, duplicate ledger check, নতুন ledger insert এবং `balance = balance + amount` update করব। যেকোনো ধাপে failure হলে সব rollback হবে।
+
+**প্রশ্ন ৬: Ledger-কে source of truth বলা হলেও wallet balance রাখা হচ্ছে কেন?**  
+প্রতিবার ledger sum করলে dashboard ধীর হতে পারে। Wallet দ্রুত read-এর জন্য cached projection; reconciliation job ledger sum-এর সঙ্গে wallet balance মিলিয়ে drift শনাক্ত করবে।
+
+**প্রশ্ন ৭: CoinJob-এর কোন failure retry করা যাবে?**  
+Database deadlock, timeout বা সাময়িক queue/database outage retry করা যাবে। Invalid user, malformed event বা business-rule violation permanent failure হিসেবে `FAILED` হবে এবং alert/manual review প্রয়োজন হবে।
+
+**প্রশ্ন ৮: Coin reward-এর জন্য exactly-once processing কীভাবে দাবি করবেন?**  
+Worker execution at-least-once হতে পারে, কিন্তু ledger effect idempotent করা হবে। Unique reward reference এবং atomic wallet/ledger transaction-এর কারণে business result effectively once হবে।
+
+**প্রশ্ন ৯: User কি ride complete হওয়ার সঙ্গে সঙ্গে coin দেখবে?**  
+সাধারণত `PENDING` reward status দেখানো যায়। CoinJob `COMPLETED` হলে wallet API নতুন balance ফেরত দেবে; প্রয়োজনে polling বা notification ব্যবহার করা যাবে। Frontend কখনও নিজে balance বাড়াবে না।
+
+**প্রশ্ন ১০: Coin fraud বা manual adjustment কীভাবে audit করবেন?**  
+Ledger append-only থাকবে। Manual adjustment আলাদা `ADJUSTMENT` entryType, actor, reason এবং reference সহ insert হবে; পুরোনো credit edit/delete করা হবে না।
+
+### Ride Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> REQUESTED
+    REQUESTED --> MATCHED: driver accepts / pool match
+    MATCHED --> DRIVER_ARRIVED: driver arrives
+    DRIVER_ARRIVED --> STARTED: ride starts
+    STARTED --> COMPLETED: ride ends
+    REQUESTED --> CANCELLED: cancel
+    MATCHED --> CANCELLED: cancel
+    DRIVER_ARRIVED --> CANCELLED: cancel before start
+```
+
+Only valid transitions are accepted by the state machine. Each transition records the previous status, new status, actor, optional note, and timestamp in `RideHistory`.
+
+## Database Design / ERD (বাংলা নকশা)
+
+PostgreSQL হলো identity, ride, vehicle capacity, pooling, payment, ticket hold, coin এবং audit history-এর source of truth। Prisma schema, migration এবং transactional write পরিচালনা করবে। নিচের ERD-তে বর্তমান ride model-এর সঙ্গে payment ও reward domain যুক্ত করা হয়েছে।
+
+```mermaid
+erDiagram
+    USER ||--o| DRIVER : has_optional_profile
+    USER ||--o{ RIDE : requests
+    USER o|--o{ RIDE_HISTORY : acts_on_optionally
+    DRIVER ||--o| TESLA : drives
+    DRIVER o|--o{ RIDE : accepts_optionally
+    TESLA o|--o{ RIDE : fulfills_optionally
+    TESLA ||--o{ POOL : hosts
+    ZONE ||--o{ RIDE : pickup
+    ZONE ||--o{ RIDE : destination
+    POOL o|--o{ RIDE : groups_optionally
+    POOL ||--o{ POOL_MEMBERSHIP : contains
+    POOL ||--o{ TICKET_BOOKING : reserves_seats
+    RIDE ||--o| POOL_MEMBERSHIP : has_one
+    RIDE ||--o{ RIDE_HISTORY : records
+    RIDE ||--o{ TICKET_BOOKING : books
+    USER ||--o{ TICKET_BOOKING : owns
+    TICKET_BOOKING ||--o{ PAYMENT : has_attempts
+    USER ||--o| COIN_WALLET : owns
+    COIN_WALLET ||--o{ COIN_LEDGER : records
+    TICKET_BOOKING ||--o{ COIN_LEDGER : rewards_optional
+    OUTBOX_EVENT ||--o{ COIN_JOB : triggers
+    USER ||--o{ COIN_JOB : receives_rewards
+
+    USER {
+      uuid id PK
+      string name
+      string email UK
+      string passwordHash
+      Role role
+      datetime createdAt
+      datetime updatedAt
+    }
+    DRIVER {
+      uuid id PK
+      string userId FK, UK
+      boolean isOnline
+      datetime createdAt
+      datetime updatedAt
+    }
+    TESLA {
+      uuid id PK
+      string name
+      string driverId FK, UK
+      int capacity
+      datetime createdAt
+      datetime updatedAt
+    }
+    ZONE {
+      uuid id PK
+      string name UK
+      decimal latitude
+      decimal longitude
+      datetime createdAt
+    }
+    POOL {
+      uuid id PK
+      string teslaId FK
+      int capacitySeats "snapshot of Tesla capacity"
+      RideStatus status
+      datetime createdAt
+      datetime updatedAt
+    }
+    RIDE {
+      uuid id PK
+      string passengerId FK
+      string driverId FK "nullable"
+      string teslaId FK "nullable"
+      string poolId FK "nullable"
+      string pickupZoneId FK
+      string destinationZoneId FK
+      int seatsRequested
+      decimal distanceKm
+      int farePoysha
+      int poolDiscountPoysha
+      PaymentMethod paymentMethod
+      PaymentStatus paymentStatus
+      RideStatus status
+      datetime requestedAt
+      datetime matchedAt "nullable"
+      datetime driverArrivedAt "nullable"
+      datetime startedAt "nullable"
+      datetime completedAt "nullable"
+      datetime cancelledAt "nullable"
+    }
+    POOL_MEMBERSHIP {
+      uuid id PK
+      string poolId FK
+      string rideId FK, UK
+      int seats
+      datetime joinedAt
+    }
+    RIDE_HISTORY {
+      uuid id PK
+      string rideId FK
+      string actorId FK "nullable"
+      RideStatus fromStatus "nullable"
+      RideStatus toStatus
+      string note "nullable"
+      datetime createdAt
+    }
+    TICKET_BOOKING {
+      uuid id PK
+      string bookingCode UK
+      string rideId FK
+      string poolId FK
+      string passengerId FK
+      BookingStatus status "HELD/CONFIRMED/EXPIRED/CANCELLED"
+      int seats
+      int totalFarePoysha
+      datetime heldAt
+      datetime expiresAt
+      datetime confirmedAt "nullable"
+      datetime expiredAt "nullable"
+      datetime createdAt
+    }
+    PAYMENT {
+      uuid id PK
+      string bookingId FK
+      PaymentMethod method
+      PaymentStatus status "REQUIRES_PAYMENT/PROCESSING/SUCCEEDED/FAILED/REFUND_PENDING/REFUND_FAILED/REFUNDED"
+      int amountPoysha
+      string currency
+      string provider
+      string providerAccount
+      string providerPaymentId "nullable"
+      string providerRefundId "nullable"
+      string idempotencyScope
+      string idempotencyKey
+      string webhookEventId "nullable"
+      datetime paidAt "nullable"
+      datetime createdAt
+      datetime updatedAt
+    }
+    COIN_WALLET {
+      uuid id PK
+      string userId FK, UK
+      int balance
+      datetime updatedAt
+    }
+    COIN_LEDGER {
+      uuid id PK
+      string walletId FK
+      string bookingId FK "nullable"
+      CoinEntryType entryType
+      int amount
+      string referenceType
+      string referenceId
+      datetime createdAt
+    }
+    OUTBOX_EVENT {
+      uuid id PK
+      string eventType
+      string aggregateId
+      json payload
+      OutboxStatus status
+      datetime availableAt
+      int attempts
+      string leaseOwner "nullable"
+      datetime leaseUntil "nullable"
+      datetime processedAt "nullable"
+    }
+    COIN_JOB {
+      uuid id PK
+      string eventId FK
+      string userId FK
+      string jobType
+      string idempotencyKey UK
+      JobStatus status
+      int attempts
+      int maxAttempts
+      string leaseOwner "nullable"
+      datetime leaseUntil "nullable"
+      datetime runAt
+      string lastError "nullable"
+      datetime completedAt "nullable"
+    }
+```
+
+Preview-safe relationship map:
+
+```text
+USER (1) ------------------ (0..1) DRIVER
+  |                              |
+  | requests                     | drives
+  |                              v
+  |                         (0..1) TESLA
+  |                              |
+  |                              +---- (0..many) POOL
+  |
+  +---- (0..many) RIDE <---------- optional DRIVER
+             |
+             +-------------------- optional TESLA
+             +-------------------- optional POOL
+             +---- (1) pickup ZONE
+             +---- (1) destination ZONE
+             +---- (0..1) POOL_MEMBERSHIP ---- (1) POOL
+             +---- (0..many) RIDE_HISTORY ---- optional USER(actor)
+```
+
+### ডেটাবেস rules এবং data integrity
+
+- **Identity ও ownership:** `User`-এর একটি optional `Driver`, সর্বোচ্চ একটি `CoinWallet`, এবং প্রতিটি booking-এর একজন passenger থাকবে।
+- **Capacity aggregate:** Tesla-এর static capacity `Tesla.capacity`; নির্দিষ্ট scheduled pool-এ reservation serialize করার aggregate হলো `Pool.capacitySeats` snapshot। Booking সবসময় একই `Pool` row lock করে confirmed ও unexpired held seat count করবে। Capacity enforce করতে শুধু unique index বা `CHECK` constraint ব্যবহার করা হবে না।
+- **Ticket hold:** `TicketBooking.expiresAt` database time অনুযায়ী ১০ মিনিট। `HELD` booking-এর seat reserve থাকবে; `CONFIRMED` বা `EXPIRED` হলে final state হবে। একই passenger-এর একই pool-এ active duplicate booking আটকাতে scoped unique rule ব্যবহার করা যাবে, কিন্তু aggregate capacity service transaction-এই enforce হবে।
+- **Ride–booking cardinality:** একটি `Ride`-এর সঙ্গে অনেক passenger-এর `TicketBooking` থাকতে পারে; প্রতিটি booking এক passenger ও এক pool-এর জন্য। একই passenger একই ride-এ একাধিক active booking করতে পারবে না।
+- **Payment:** `PaymentAttempt`-এ প্রতিটি retry আলাদা attempt হতে পারে। `provider + providerAccount + providerPaymentId` এবং `provider + providerAccount + webhookEventId` scoped unique হবে; amount ও currency অবশ্যই booking-এর সঙ্গে মিলবে।
+- **Coin:** `CoinLedger` append-only; wallet-এর cached balance ledger-এর সঙ্গে transaction-এ বদলাবে। একই reward event দ্বিতীয়বার apply না হওয়ার জন্য reference uniqueness থাকবে।
+- **Outbox ও job:** database commit-এর সঙ্গে event commit হবে। Worker processing lease নিয়ে bounded retry করবে; lease timeout বা transient failure হলে retry, permanent failure হলে `FAILED` ও reconciliation হবে। `CoinJob` এবং ledger uniqueness duplicate reward ঠেকাবে।
+- **Auditability:** `RideHistory`, payment status history এবং outbox/job timestamps operational audit-এর জন্য রাখা হবে।
+- **Deletion:** payment, ledger এবং audit record hard-delete না করে protected/restricted delete বা anonymization ব্যবহার করতে হবে।
+
+### প্রয়োজনীয় index ও enum
+
+| Table | গুরুত্বপূর্ণ index/constraint | উদ্দেশ্য |
+| --- | --- | --- |
+| `TicketBooking` | `bookingCode UNIQUE`, `(rideId, status, expiresAt)` | booking lookup এবং expiry scan দ্রুত করা |
+| `Payment` | `(provider, providerAccount, providerPaymentId) UNIQUE`, `(provider, providerAccount, webhookEventId) UNIQUE`, scoped idempotency key | provider retry/webhook duplicate ঠেকানো |
+| `CoinLedger` | `(referenceType, referenceId, entryType) UNIQUE`, `(walletId, createdAt)` | একই reward দ্বিতীয়বার না দেওয়া এবং history pagination |
+| `OutboxEvent` | `(status, availableAt)`, `(status, leaseUntil)` | pending event claim এবং lease recovery |
+| `CoinJob` | `(eventId, jobType) UNIQUE`, `(status, runAt)`, `(status, leaseUntil)` | retry-safe coin settlement |
+
+প্রস্তাবিত enum: `BookingStatus = HELD | CONFIRMED | EXPIRED | CANCELLED`, `PaymentStatus = REQUIRES_PAYMENT | PROCESSING | SUCCEEDED | FAILED | REFUND_PENDING | REFUND_FAILED | REFUNDED`, `CoinEntryType = CREDIT | DEBIT | REVERSAL | ADJUSTMENT`, এবং `JobStatus = PENDING | PROCESSING | COMPLETED | FAILED`। State transition service ছাড়া সরাসরি status update করা যাবে না।
+
+### Applications
+
+| Application | Directory | Local URL | Production |
+| --- | --- | --- | --- |
+| Frontend | `frontend/` | `http://localhost:3001` | Vercel |
+| Backend | `backend/` | `http://localhost:4000` | Vercel serverless function |
+| PostgreSQL | Docker service | `localhost:5432` | Hosted PostgreSQL |
+
+### Project Structure
+
+```text
+backend/
+  api/index.js             Vercel serverless entry point
+  prisma/                  Schema, migrations, and seed data
+  src/server.js            Express application
+  src/controllers/         Request handlers
+  src/middlewares/         Auth, ownership, and error handling
+  src/routes/              API route registration
+  src/utils/               Fare, matching, zones, and state logic
+  src/tests/               Jest and Supertest tests
+  vercel.json              Vercel route rewrites for Express paths
+
+frontend/
+  src/app/                 Next.js App Router pages
+  src/components/          Shared UI components
+  src/context/             Authentication context
+  src/lib/api.js           API client and JWT header handling
+  public/images/            Static image assets
+
+docker-compose.yml         Local PostgreSQL, backend, and frontend services
+```
+
+
+
+## API Overview (বাংলা contract)
+
+সব application route `/api` দিয়ে শুরু হবে। এই README-তে source verification না থাকায় endpoint-গুলো **Proposed**, যতক্ষণ না route/service/test দিয়ে যাচাই করা হয়। Protected request-এ JWT, resource ownership check এবং write request-এ operation-scoped `Idempotency-Key` ব্যবহার করতে হবে।
+
+সাধারণ response rule: validation হলে `400`, unauthenticated হলে `401`, ownership/role ব্যর্থ হলে `403`, resource না পেলে `404`, expired বা concurrent state conflict হলে `409`, এবং unexpected provider/database failure হলে `5xx`। Error response-এ stable `code`, human-readable `message` এবং `requestId` থাকবে।
+
+### Authentication
+
+- `POST /api/auth/register`
+- `POST /api/auth/login`
+
+### Passenger and ride routes
+
+- `POST /api/rides`
+- `GET /api/rides/:id`
+- `PATCH /api/rides/:id/status`
+- `GET /api/rides/history`
+
+### Driver routes
+
+- `GET /api/drivers/me`
+- `GET /api/drivers/requests`
+- `GET /api/drivers/history`
+- `PATCH /api/drivers/online`
+
+### Pool routes
+
+- `POST /api/rides/:id/match`
+- `GET /api/pools/:id`
+
+### Ticket booking এবং hold routes
+
+- `POST /api/bookings` — rideId, seats, paymentMethod দিয়ে ১০ মিনিটের `HELD` booking তৈরি
+- `GET /api/bookings/:id` — status, `expiresAt`, fare ও payment status
+- `POST /api/bookings/:id/confirm` — সফল payment-এর পর server-side confirmation
+- `POST /api/bookings/:id/cancel` — hold/confirmed booking cancel এবং প্রয়োজন হলে refund
+- `POST /api/bookings/:id/payment-intent` — gateway payment intent তৈরি বা idempotently ফেরত
+
+### Payment routes
+
+- `POST /api/payments/webhook/:provider` — signature যাচাই করে payment status update
+- `GET /api/payments/:id` — passenger-এর payment attempt status
+- `POST /api/payments/:id/refund` — অনুমোদিত cancellation/refund operation
+
+### Coin routes
+
+- `GET /api/coins/wallet` — বর্তমান balance এবং summary
+- `GET /api/coins/ledger` — append-only credit/debit history
+
+### Internal job routes
+
+- `POST /api/internal/jobs/expire-holds` **[Proposed]** — scheduler/worker-এর জন্য protected endpoint
+- `POST /api/internal/jobs/settle-coins` **[Proposed]** — outbox থেকে pending coin job process
+- `POST /api/internal/jobs/reconcile-payments` **[Proposed]** — provider settlement ও local payment attempt মিলিয়ে দেখা
+- `POST /api/internal/jobs/reconcile-coins` **[Proposed]** — CoinLedger, CoinWallet এবং CoinJob mismatch report করা
+
+Internal job endpoint public JWT route হিসেবে expose করা যাবে না। Dedicated scheduler secret/mTLS, allowlist, request signature এবং job-level idempotency ব্যবহার করতে হবে। Endpoint duplicate invocation tolerate করবে এবং lease/retry state database থেকে নেবে।
+
+### Scheduled worker এবং Vercel caveat
+
+`expire-holds`, outbox dispatch এবং `settle-coins` worker-এর design **Proposed**। বর্তমান README-তে deployed Vercel Cron configuration বা actual execution limit যাচাই করা হয়নি; তাই Cron delivery guaranteed ধরে নেওয়া যাবে না। Production-এ deployed `vercel.json`/Cron configuration, provider execution timeout, overlap policy, retry behavior এবং monitoring যাচাই করতে হবে। Critical expiry/payment reconciliation-এর জন্য durable queue বা external scheduler ব্যবহার করা নিরাপদ; worker idempotent হওয়ায় missed invocation পরের run-এ recover করতে পারবে।
+
+### Booking response-এর উদাহরণ
+
+```json
+{
+  "bookingId": "uuid",
+  "bookingCode": "DTP-20261014-0001",
+  "status": "HELD",
+  "seats": 2,
+  "totalFarePoysha": 27200,
+  "expiresAt": "2026-10-14T10:10:00.000Z",
+  "paymentStatus": "REQUIRES_PAYMENT"
+}
+```
+
+`expiresAt` পার হয়ে গেলে API `409 BOOKING_EXPIRED` দেবে। Payment webhook পুনরায় এলে provider-scoped event/payment ID এবং একই idempotency payload দিয়ে আগের ফল ফেরত দেবে; ভিন্ন payload হলে `409 IDEMPOTENCY_PAYLOAD_MISMATCH` হবে। Duplicate charge বা duplicate coin তৈরি করা যাবে না।
+
+### Proposed webhook contract
+
+`POST /api/payments/webhook/:provider` **[Proposed]** কেবল signature verification সফল হলে process হবে। Handler provider transaction ID, merchant account, amount, currency, event ID, timestamp এবং booking/payment mapping যাচাই করবে। Duplicate event হলে আগের persisted result ফেরত দেবে; invalid signature, amount বা currency হলে `400 WEBHOOK_VERIFICATION_FAILED` দেবে এবং কোনো booking state বদলাবে না।
+
+Protected routes require:
+
+```http
+Authorization: Bearer <jwt-token>
+```
+
+## Demo Data
+
+The seed script creates demo users and zones. Demo password:
+
+```text
+Password123!
+```
+
+Demo accounts:
+
+- Driver: `jashim@example.com`
+- Passenger: `nusrat@example.com`
+- Passenger: `rafiq@example.com`
+- Passenger: `shirin@example.com`
+
+Do not use these credentials in a real production system.
+
+## Known Limitations & Next Improvements
+
+- **Corridor-based matching**: Matching uses predefined zone corridors rather than live distance, traffic, or map routing. A future version could use a routing provider or PostGIS.
+- **No real-time tracking**: Ride status is refreshed through REST requests and does not include live vehicle location tracking. WebSockets or server-sent events could support this later.
+- **Single-region deployment**: The current Vercel and hosted PostgreSQL deployment is intended for a single-region MVP. Multi-region services and read replicas may be needed for broader coverage.
+- **Payment gateway rollout**: Payment intent, signed webhook, refund এবং reconciliation-এর contract এই README-তে নির্ধারিত। বর্তমান MVP-তে gateway adapter simulated হতে পারে; production-এ bKash/card provider, webhook secret এবং settlement reconciliation চালু করতে হবে।
+
+## Troubleshooting
+
+### CORS error in the browser
+
+Confirm that:
+
+1. `CORS_ORIGIN` exactly matches the frontend origin, including `https://` and without a trailing slash.
+2. `NEXT_PUBLIC_API_URL` ends with `/api`.
+3. The backend has been redeployed after changing its environment variables.
+4. The backend `vercel.json` rewrite is deployed.
+5. The preflight response contains `Access-Control-Allow-Origin`.
+
+Do not enter environment values through a shell pipeline that adds line endings. A value such as `production\r\n` fails backend validation. Vercel's dashboard environment editor or a newline-free value file should be used.
+
+### `FUNCTION_INVOCATION_FAILED`
+
+Check the Vercel runtime logs and verify that `DATABASE_URL`, `JWT_SECRET`, `NODE_ENV`, and `CORS_ORIGIN` exist in the Production environment. The Docker hostname `postgres` is valid only inside Docker Compose and cannot be used by Vercel.
+
+### Vercel cannot find the project
+
+Deploy each project from its configured root directory or from the repository root with the project linked. Do not configure the repository root as both the working directory and the project root.
+
+### Database is unavailable
+
+Check the hosted database connection string, SSL requirements, connection pool limits, and whether the database allows connections from the deployment provider. Then run `npx prisma migrate deploy` against that same database.
+
+## Fare Model
+
+The fare calculator uses the following formula:
+
+```text
+passengerFare = baseFare + (distanceKm * perKmRate) - poolDiscount
+```
+
+Current implementation constants:
+
+- `baseFare = 5,000` poysha (BDT 50)
+- `perKmRate = 3,000` poysha per kilometre (BDT 30/km)
+- `poolDiscount = 20% of the gross fare` when the ride is pooled
+
+Worked examples:
+
+| Passenger | Route | Distance | Gross fare | Pool discount | Passenger fare |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Nusrat | Banani -> Mohakhali | 4 km | `5,000 + (4 * 3,000) = 17,000` | `20% of 17,000 = 3,400` | `13,600` poysha (BDT 136) |
+| Rafiq | Banani -> Gulshan 1 | 5 km | `5,000 + (5 * 3,000) = 20,000` | `20% of 20,000 = 4,000` | `16,000` poysha (BDT 160) |
+
+Without pooling, the discount is zero, so the same fares would be `17,000` and `20,000` poysha. The implementation rounds distance charges and discounts to whole poysha and stores fare values as integers.
+
+## Design and Domain Decisions
+
+- Predefined zones keep the MVP independent of an external maps provider.
+- PostgreSQL provides relational integrity for users, rides, pools, and history.
+- Serializable transactions prevent two concurrent matches from exceeding Tesla capacity.
+- JWT keeps authentication stateless for the MVP.
+- The current matching algorithm is intentionally limited to compatible predefined corridors.
+
+
+
+## AI Usage
+
+### AI Tool: Google Antigravity
+
+Google Antigravity was used as an AI engineering and development tool for:
+
+- implementation assistance
+- debugging
+- configuration and deployment assistance
+- code improvement and refactoring
+- testing assistance
+- documentation and README assistance
+
+The developer reviewed and tested the resulting work and remains responsible for understanding the implementation, validating behavior, and making final engineering decisions.
+
