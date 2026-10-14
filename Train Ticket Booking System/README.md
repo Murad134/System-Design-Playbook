@@ -354,17 +354,15 @@ Prometheus, Grafana, ELK এর মাধ্যমে সিস্টেমে�
 ##### Arrow flow
 ```mermaid
 flowchart TD
-    User1["Passenger (User)"] --> React["React / Next.js Web App"]
-    React --> Gateway["Express REST API Gateway & Auth Service"]
-    Gateway --> Booking1["Booking Service (Seat Hold State)"]
-    Booking1 --> Payment1["Payment Service"]
-    Payment1 --> ExtPG["External Payment Gateway"]
-    ExtPG -- "Payment Completed" --> Webhook["Idempotency Webhook Handler"]
-    Webhook --> Payment2["Payment Service"]
-    Payment2 --> Booking2["Booking Service"]
-    Booking2 --> DB["PostgreSQL DB (ACID Row Locking)"]
-    DB --> Notification["SMS / Email Gateway (Notification Service)"]
-    Notification --> User2["Passenger (User) (Receives Ticket)"]
+    subgraph Row1 ["1. Request & Payment Initiation (Left to Right)"]
+        direction LR
+        User1["Passenger (User)"] --> React["React / Next.js Web App"] --> Gateway["Express REST API Gateway & Auth Service"] --> Booking1["Booking Service (Seat Hold)"] --> Payment1["Payment Service"] --> ExtPG["External Payment Gateway"]
+    end
+
+    subgraph Row2 ["2. Webhook & Database Update (Right to Left)"]
+        direction RL
+        User2["Passenger (Receives Ticket)"] <-- Notification["SMS / Email Gateway"] <-- DB["PostgreSQL DB (ACID Row Locking)"] <-- Booking2["Booking Service"] <-- Payment2["Payment Service"] <-- Webhook["Idempotency Webhook Handler"] <-- ExtPG
+    end
 ```
 
 ##### Step-by-step workflow
