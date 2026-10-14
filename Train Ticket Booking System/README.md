@@ -353,16 +353,41 @@ Prometheus, Grafana, ELK এর মাধ্যমে সিস্টেমে�
 #### Summarized Table for Quick Reference
 ##### Arrow flow
 ```mermaid
-flowchart TD
-    subgraph Row1 ["1. Request & Payment Initiation (Left to Right)"]
+flowchart TB
+
+    subgraph S1["① Booking Request"]
         direction LR
-        User1["Passenger (User)"] --> React["React / Next.js Web App"] --> Gateway["Express REST API Gateway & Auth Service"] --> Booking1["Booking Service (Seat Hold)"] --> Payment1["Payment Service"] --> ExtPG["External Payment Gateway"]
+        U1["👤 Passenger"] -->|"Seat select"| W["React / Next.js<br/>Web App"]
+        W -->|"HTTPS"| G["Express API Gateway<br/>& Auth Service"]
+        G -->|"JWT verified"| B1["Booking Service<br/>(Seat Hold State)"]
     end
 
-    subgraph Row2 ["2. Webhook & Database Update (Right to Left)"]
+    subgraph S2["② Payment Processing"]
         direction RL
-        User2["Passenger (Receives Ticket)"] <-- Notification["SMS / Email Gateway"] <-- DB["PostgreSQL DB (ACID Row Locking)"] <-- Booking2["Booking Service"] <-- Payment2["Payment Service"] <-- Webhook["Idempotency Webhook Handler"] <-- ExtPG
+        P1["Payment Service"] -->|"Create payment"| PG["External<br/>Payment Gateway"]
+        PG -->|"Payment completed"| WH["Idempotency<br/>Webhook Handler"]
+        WH -->|"Verified event"| P2["Payment Service<br/>(Confirm)"]
     end
+
+    subgraph S3["③ Confirmation & Ticket"]
+        direction LR
+        B2["Booking Service<br/>(Confirm)"] -->|"Commit"| DB[("PostgreSQL<br/>ACID Row Locking")]
+        DB -->|"Booking confirmed"| N["Notification Service<br/>SMS / Email Gateway"]
+        N -->|"E-ticket"| U2["👤 Passenger<br/>(Receives Ticket)"]
+    end
+
+    S1 ==>|"Initiate payment"| S2
+    S2 ==>|"Update booking"| S3
+
+    classDef user fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    classDef svc fill:#E6F1FB,stroke:#185FA5,color:#042C53
+    classDef ext fill:#FAEEDA,stroke:#854F0B,color:#412402
+    classDef db fill:#EEEDFE,stroke:#534AB7,color:#26215C
+
+    class U1,U2 user
+    class W,G,B1,B2,P1,P2,N svc
+    class PG,WH ext
+    class DB db
 ```
 
 ##### Step-by-step workflow
