@@ -351,27 +351,135 @@ Prometheus, Grafana, ELK এর মাধ্যমে সিস্টেমে�
 সুবিধা (Benefit): ইউজার ট্রাস্ট ও ক্লায়েন্ট এক্সপেরিয়েন্স ভালো থাকে এবং প্রোডাকশন ডাউনটাইম বা মেমোরি লিক দ্রুত সমাধান করা যায়।
 
 #### Summarized Table for Quick Reference
-	
-##### Step:1 - 3 	
-Gateway Auth & Input Validation	ইনপুট ফিল্টারিং ও রুটিন	ক্ষতিকর বা ভুল রিকোয়েস্ট ডাটাবেজ পর্যন্ত পৌঁছায় না
+##### Arrow flow
+```mermaid
+flowchart TD
+    User1["Passenger (User)"] --> React["React / Next.js Web App"]
+    React --> Gateway["Express REST API Gateway & Auth Service"]
+    Gateway --> Booking1["Booking Service (Seat Hold State)"]
+    Booking1 --> Payment1["Payment Service"]
+    Payment1 --> ExtPG["External Payment Gateway"]
+    ExtPG -- "Payment Completed" --> Webhook["Idempotency Webhook Handler"]
+    Webhook --> Payment2["Payment Service"]
+    Payment2 --> Booking2["Booking Service"]
+    Booking2 --> DB["PostgreSQL DB (ACID Row Locking)"]
+    DB --> Notification["SMS / Email Gateway (Notification Service)"]
+    Notification --> User2["Passenger (User) (Receives Ticket)"]
 
-##### Step:4 - 7	
-ACID DB Txn + FOR UPDATE	সিট লকিং ও ১০ মিনিটের অস্থায়ী হোল্ড	Race Condition & Double Booking 100% বন্ধ
-
-##### Step:8 - 9
-Decoupled Payment Initiation	থার্ড-পার্টি গেটওয়েতে রিডাইরেক্ট	পেমেন্ট টাইমে DB Transaction মেমোরি ফ্রি রাখা
-
-##### Step:10 - 11
-Verified Idempotent Webhook	গেটওয়ে কলব্যাক চেক ও সিগনেচার যাচাই	Duplicate Webhook / Multi-billing প্রতিরোধ
-
-##### Step:12	
-Atomic Confirmation	সিট স্থায়ী বরাদ্দ ও টিকিট তৈরি	ডেটাবেজে সম্পূর্ণ সঠিক স্ট্যাটাস নিশ্চিত
-
-##### Step:13 - 14	
-Expiry Worker & Refund Workflow	নির্দিষ্ট সময়ের পর হোল্ড রিলিজ	অলস সিট না আটকে অটোমেটিক রিলিজ & Safe Refund
-
-##### Step:15
-Observability & Live Status	মনিটরিং ও ইউজার নোটিফিকেশন	রিয়েল-টাইম ফিডব্যাক ও সিস্টেম স্ট্যাবিলিটি
+Step-by-step workflow
+##### 1. Passenger → React / Next.js Web App
+যাত্রী প্রথমে ওয়েব অ্যাপে প্রবেশ করে যাত্রার তারিখ, Departure Station, Destination Station এবং পছন্দের ট্রেন নির্বাচন করে। এরপর অ্যাপ উপলব্ধ সিট দেখায় এবং যাত্রী একটি বা একাধিক সিট নির্বাচন করে বুকিংয়ের অনুরোধ করে।
+- Frontend: React.js / Next.js
+- কাজ: Train search, seat selection, passenger information এবং booking request তৈরি করা।
+- গুরুত্বপূর্ণ বিষয়: Frontend-এ সিট Available দেখালেই সেটি নিশ্চিতভাবে Available—এমন নয়। অন্য যাত্রী একই সময়ে সিট বুক করতে পারে।
+##### 2. React App → HTTPS / TLS 1.3 → Express REST API Gateway
+Frontend বুকিংয়ের অনুরোধটি HTTPS-এর মাধ্যমে API Gateway-তে পাঠায়। HTTPS এবং TLS 1.3 ক্লায়েন্ট ও সার্ভারের মধ্যে যোগাযোগ এনক্রিপ্ট করে, ফলে নেটওয়ার্কে সংবেদনশীল তথ্য সুরক্ষিত থাকে।
+উদাহরণ:
+POST /api/bookings
+Request body-তে থাকতে পারে:
+- trainId
+- journeyDate
+- seatIds
+- passengerDetails
+API Gateway রিকোয়েস্ট গ্রহণ করে উপযুক্ত Backend Service-এ পাঠানোর ব্যবস্থা করে। এটি Routing, Rate Limiting এবং Authentication Middleware-এর মতো কাজও পরিচালনা করতে পারে।
+#####  3. API Gateway → Authentication & Request Validation
+API Gateway বা সংশ্লিষ্ট Middleware যাচাই করে যাত্রী লগইন করেছেন কি না এবং তাঁর রিকোয়েস্ট সঠিক কি না।
+এখানে দুটি গুরুত্বপূর্ণ যাচাই হয়:
+- Authentication: JWT বা Session যাচাই করে যাত্রীর পরিচয় নিশ্চিত করা।
+- Validation: ট্রেন আইডি, যাত্রার তারিখ, সিট আইডি এবং অন্যান্য ইনপুট বৈধ কি না যাচাই করা।
+অননুমোদিত ইউজার হলে 401 Unauthorized এবং ভুল ইনপুট হলে 400 Bad Request ফেরত দেওয়া যেতে পারে।
+তবে এখানে সিট বুকিং নিশ্চিত করা হয় না; সেটি Booking Service-এর দায়িত্ব।
+#####  4. Authentication → Booking Service
+Authentication সফল হলে রিকোয়েস্ট Booking Service-এ পাঠানো হয়। এই সার্ভিস বুকিংয়ের মূল Business Logic পরিচালনা করে।
+Booking Service প্রথমে যাচাই করে:
+- ট্রেন ও যাত্রার তারিখ বৈধ কি না।
+- নির্বাচিত সিটগুলো এখনো বুকিংয়ের জন্য পাওয়া যাচ্ছে কি না।
+- যাত্রীর জন্য আগের কোনো Pending Booking রয়েছে কি না, যেখানে প্রাসঙ্গিক।
+সিট পাওয়া গেলে সেগুলো নির্দিষ্ট সময়ের জন্য সাময়িকভাবে Hold করা যেতে পারে। এরপর একটি Pending Booking তৈরি হয় এবং বুকিংয়ের মেয়াদ নির্ধারণ করা হয়।
+উদাহরণ:
+bookingId = BK-1001
+bookingStatus = PENDING_PAYMENT
+expiresAt = 2026-10-14T18:15:00Z
+সাময়িক Hold-এর সময়সীমা শেষ হওয়ার আগেই পেমেন্ট সম্পন্ন করতে হবে। তা না হলে সিট আবার Available করা হবে।
+##### 5. Booking Service → Payment Service
+Booking Service বুকিংয়ের তথ্য Payment Service-এ পাঠায়, যাতে পেমেন্ট শুরু করা যায়।
+Payment Service বুকিং আইডি, নির্ধারিত ভাড়া এবং পেমেন্টের অবস্থা যাচাই করে একটি Payment Record তৈরি করে।
+উদাহরণ:
+- paymentId: PAY-5001
+- bookingId: BK-1001
+- amount: ৳800
+- paymentStatus: INITIATED
+এখানে Booking Service এবং Payment Service-এর দায়িত্ব আলাদা রাখা হয়। Booking Service সিট ও বুকিং পরিচালনা করে, আর Payment Service অর্থ লেনদেন পরিচালনা করে।
+##### 6. Payment Service → External Payment Gateway
+Payment Service একটি অনুমোদিত Payment Gateway-এর মাধ্যমে পেমেন্ট শুরু করে। বাংলাদেশের ক্ষেত্রে bKash বা SSLCommerz-এর মতো সেবা ব্যবহার করা যেতে পারে; Stripe-ও সমর্থিত বাজারে ব্যবহার করা যায়।
+সাধারণত Backend Gateway-তে পেমেন্ট তৈরি করে এবং Frontend-কে Checkout URL বা প্রয়োজনীয় Payment Session দেয়।
+যাত্রী এরপর পেমেন্ট সম্পন্ন করেন।
+গুরুত্বপূর্ণ: শুধু Frontend-এর Success Page দেখে পেমেন্ট সফল ধরে নেওয়া যাবে না। নির্ভরযোগ্য Gateway Confirmation দিয়ে সেটি যাচাই করতে হবে।
+##### 7. External Payment Gateway → Idempotent Webhook Handler
+পেমেন্ট সফল বা ব্যর্থ হলে Payment Gateway Backend-এর নির্ধারিত Webhook URL-এ একটি Event পাঠায়।
+উদাহরণ:
+POST /api/webhooks/payment
+Webhook Handler প্রথমে Gateway-এর Signature যাচাই করে এবং Event-এর সত্যতা নিশ্চিত করে।
+এরপর Event ID বা Payment Reference ব্যবহার করে দেখে একই Event আগেই প্রসেস করা হয়েছে কি না।
+এখানেই Idempotency গুরুত্বপূর্ণ।
+ধরা যাক, Gateway একই Payment Success Event তিনবার পাঠাল। সিস্টেম এমনভাবে তৈরি করতে হবে, যেন তিনবার Event এলেও পেমেন্ট একবারই সফল হিসেবে রেকর্ড হয় এবং একই বুকিংয়ের জন্য একাধিক টিকিট তৈরি না হয়।
+Database-এ Unique Constraint এবং Transaction ব্যবহার করে এই সুরক্ষা আরও শক্তিশালী করা যায়।
+##### 8. Webhook Handler → Payment Service
+Webhook Handler যাচাইকৃত Payment Event Payment Service-এ পাঠায়। Payment Service প্রয়োজনীয় তথ্য Gateway-এর রেকর্ডের সঙ্গে মিলিয়ে দেখে।
+যাচাইয়ের মধ্যে থাকতে পারে:
+- Payment Reference সঠিক কি না।
+- বুকিংয়ের সঙ্গে পেমেন্টের সম্পর্ক আছে কি না।
+- পরিশোধিত Amount প্রত্যাশিত ভাড়ার সমান কি না।
+- Currency এবং Transaction Status সঠিক কি না।
+সব যাচাই সফল হলে Payment Record-এর অবস্থা SUCCEEDED করা হয়। পেমেন্ট ব্যর্থ হলে সেটি FAILED বা উপযুক্ত ব্যর্থতার অবস্থায় রাখা হয়।
+এতে ভুয়া বা অসম্পূর্ণ Payment Confirmation-এর ভিত্তিতে বুকিং কনফার্ম হওয়ার ঝুঁকি কমে।
+##### 9. Payment Service → Booking Service
+Payment Service সফল পেমেন্টের তথ্য Booking Service-এ পাঠায়। এটি সরাসরি API Call বা Event-ভিত্তিক যোগাযোগের মাধ্যমে করা যেতে পারে।
+Booking Service তখন পরীক্ষা করে:
+- সংশ্লিষ্ট বুকিং এখনো বৈধ কি না।
+- সিটের Hold-এর অবস্থা কী।
+- বুকিংয়ের মেয়াদ শেষ হয়েছে কি না।
+- একই বুকিং আগে থেকেই Confirmed হয়েছে কি না।
+সব শর্ত পূরণ হলে বুকিং কনফার্ম করার প্রক্রিয়া শুরু হয়।
+তবে Payment Service এবং Booking Service আলাদা ডেটাবেজ ব্যবহার করলে দুটির আপডেটকে একটি সাধারণ ACID Transaction-এর মধ্যে রাখা যায় না। সে ক্ষেত্রে নির্ভরযোগ্য Event Processing, Retry এবং Reconciliation-এর মতো ব্যবস্থা প্রয়োজন।
+##### 10. Booking Service → PostgreSQL Primary Database
+এটি পুরো সিস্টেমের সবচেয়ে গুরুত্বপূর্ণ ধাপগুলোর একটি।
+Booking Service PostgreSQL-এ Transaction শুরু করে এবং প্রয়োজন অনুযায়ী সংশ্লিষ্ট সিটের রেকর্ড Lock করে অথবা Conditional Update ব্যবহার করে। এর উদ্দেশ্য হলো, একাধিক যাত্রী একই সিট একই সময়ে বুক করতে চাইলে যেন শুধু একজনই সিটটি নিশ্চিত করতে পারেন।
+একটি সরল Workflow:
+1. BEGIN — Database Transaction শুরু।
+2. সংশ্লিষ্ট Booking এবং Seat Hold যাচাই।
+3. সিট এখনো বৈধভাবে Hold করা আছে কি না নিশ্চিত করা।
+4. Booking Status-কে CONFIRMED করা।
+5. প্রয়োজন অনুযায়ী Seat Status ও Ticket Record আপডেট করা।
+6. COMMIT — সব আপডেট সফল হলে সংরক্ষণ করা।
+কোনো ধাপে সমস্যা হলে ROLLBACK করা হয়।
+PostgreSQL-এর Unique Constraint, Row-Level Lock এবং Conditional Update ব্যবহার করে Double Booking প্রতিরোধ করা যায়।
+ACID Properties এখানে গুরুত্বপূর্ণ:
+- Atomicity: সংশ্লিষ্ট Database Transaction-এর আপডেট সম্পূর্ণ হবে, নতুবা বাতিল হবে।
+- Consistency: Database-এর নিয়ম ও Constraints অক্ষুণ্ণ থাকবে।
+- Isolation: Concurrent Booking Request একে অপরের সঙ্গে অসামঞ্জস্যপূর্ণ ফল তৈরি করতে পারবে না।
+- Durability: Commit সফল হলে ডেটা স্থায়ীভাবে সংরক্ষিত থাকবে।
+মনে রাখতে হবে, ACID একই Database Transaction-এর ক্ষেত্রে প্রযোজ্য; একাধিক Microservice-এর পুরো Workflow স্বয়ংক্রিয়ভাবে একটি ACID Transaction হয়ে যায় না।
+##### 11. Booking Service / Payment Service → Notification & Ticket Service
+বুকিং সফলভাবে কনফার্ম হওয়ার পর Ticket Service প্রয়োজনীয় টিকিট তৈরি করে। টিকিটে থাকতে পারে:
+- Ticket Number এবং Booking ID
+- যাত্রীর নাম
+- ট্রেন ও যাত্রার তারিখ
+- Departure এবং Destination
+- Coach ও Seat Number
+- QR Code বা যাচাইযোগ্য Ticket Reference
+এখানে Notification Service-কে টিকিট পাঠানোর নির্দেশ দেওয়া হয়।
+আরও নির্ভরযোগ্য পদ্ধতিতে Database Transaction-এর সঙ্গে Transactional Outbox Pattern ব্যবহার করা যায়। এতে বুকিং কনফার্ম হওয়ার তথ্য এবং Notification Event প্রকাশের কাজ সমন্বিত থাকে, ফলে Database Update সফল হলেও Notification Event হারিয়ে যাওয়ার ঝুঁকি কমে।
+##### 12. Notification Service → SMS / Email Gateway
+Notification Service ইমেইল বা SMS পাঠানোর জন্য বাহ্যিক Provider ব্যবহার করে।
+- Email Gateway: টিকিটের বিস্তারিত বা PDF পাঠাতে পারে।
+- SMS Gateway: Booking Confirmation এবং সংক্ষিপ্ত Ticket Reference পাঠাতে পারে।
+- Retry Mechanism: সাময়িক Provider Failure হলে আবার পাঠানোর চেষ্টা করে।
+Notification ব্যর্থ হলেই বুকিং বাতিল করা উচিত নয়। বুকিং ইতিমধ্যে Confirmed থাকলে Notification পুনরায় পাঠানোর ব্যবস্থা থাকবে।
+##### 13. SMS / Email Gateway → Passenger
+যাত্রী ইমেইল বা SMS-এ বুকিং কনফার্মেশন এবং টিকিটের তথ্য পান। এরপর ওয়েব অ্যাপের My Bookings পেজ থেকেও টিকিট দেখতে বা ডাউনলোড করতে পারেন।
+টিকিট যাচাইয়ের সময় Ticket ID বা QR Code ব্যবহার করে Backend থেকে টিকিটের বৈধতা নিশ্চিত করা যায়।
+এই পর্যায়ে যাত্রীর কাছে বুকিং সম্পন্ন হলেও Backend-এ বুকিংয়ের তথ্য, পেমেন্টের রেকর্ড এবং টিকিটের রেকর্ড সংরক্ষিত থাকে, যাতে ভবিষ্যতে Ticket Verification, Refund, Cancellation এবং Audit করা যায়।
 
 **Simple end-to-end story:** User train search করে চারটি seat select করেন।
 Frontend API-তে booking request পাঠায়। Backend PostgreSQL transaction-এ
