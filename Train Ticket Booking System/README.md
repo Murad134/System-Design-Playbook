@@ -365,8 +365,9 @@ flowchart TD
     Booking2 --> DB["PostgreSQL DB (ACID Row Locking)"]
     DB --> Notification["SMS / Email Gateway (Notification Service)"]
     Notification --> User2["Passenger (User) (Receives Ticket)"]
+```
 
-Step-by-step workflow
+##### Step-by-step workflow
 ##### 1. Passenger → React / Next.js Web App
 যাত্রী প্রথমে ওয়েব অ্যাপে প্রবেশ করে যাত্রার তারিখ, Departure Station, Destination Station এবং পছন্দের ট্রেন নির্বাচন করে। এরপর অ্যাপ উপলব্ধ সিট দেখায় এবং যাত্রী একটি বা একাধিক সিট নির্বাচন করে বুকিংয়ের অনুরোধ করে।
 - Frontend: React.js / Next.js
