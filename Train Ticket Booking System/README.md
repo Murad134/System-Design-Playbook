@@ -551,6 +551,77 @@ seat `BOOKED` হয়। একই confirmation transaction-এ Ticket record এ
 করে। Payment না হলে expiry worker `PENDING_PAYMENT` booking-কে `EXPIRED`
 করে এবং `HELD` seat `AVAILABLE` করে release করে।
 
+#### Summarized Table for Quick Reference
+# Train Ticket Booking System — Interview Answer
+
+Junior Software Engineer · Easy–Medium System Design
+
+## Step-by-step workflow
+
+##### step: 1\. Passenger → React / Next.js
+
+Passenger train, journey date ও seats select করে booking request পাঠাবে। Frontend-এ seat Available দেখালেই সেটি নিশ্চিতভাবে available নয়, কারণ concurrent booking হতে পারে।
+
+##### step: 2\. Frontend → HTTPS / TLS 1.3 → API Gateway
+
+Frontend `POST /api/bookings` request পাঠাবে। HTTPS data encrypt করবে। `Idempotency-Key` ব্যবহার করে retry বা double-click থেকে duplicate booking প্রতিরোধ করব।
+
+##### step: 3\. API Gateway → Authentication & Validation
+
+JWT/Session দিয়ে Authentication এবং request validation করব। Rate limiting ও routing-ও এখানে থাকতে পারে।
+
+##### step: 4\. API Gateway → Booking Service → PostgreSQL
+
+Booking Service transaction ও row locking (`SELECT ... FOR UPDATE`) অথবা conditional update দিয়ে seat availability যাচাই করবে। সব requested seat available হলে `HELD` করে `PENDING_PAYMENT` booking তৈরি করবে, যার expiry ১০ মিনিট। Unique constraints double allocation ঠেকাবে। কোনো seat পাওয়া না গেলে পুরো transaction rollback করে `409 Conflict` দেব।
+
+Expiry Worker: Cron/Queue Worker expired booking-কে `EXPIRED` করবে এবং সংশ্লিষ্ট held seats `AVAILABLE` করবে। Row locking ও conditional state transition দিয়ে concurrent expiry processing নিরাপদ রাখব।
+
+##### step: 5\. Booking Service → Payment Service
+
+Payment Service booking-এর amount যাচাই করে `INITIATED` Payment Record তৈরি করবে। Booking Service seat/booking এবং Payment Service payment পরিচালনা করবে।
+
+##### step: 6\. Payment Service → External Payment Gateway
+
+Backend bKash/SSLCommerz-এর মতো Gateway-তে payment initiate করবে এবং Frontend-কে checkout information দেবে। শুধু success page দেখে payment সফল ধরব না।
+
+##### step: 7\. Payment Gateway → Idempotent Webhook Handler
+
+Gateway payment notification পাঠাবে। Signature/authenticity যাচাই করে event database-এ সংরক্ষণ করব। Unique `event_id` ও idempotency ব্যবহার করে duplicate webhook থেকে duplicate processing ঠেকাব।
+
+##### step: 8\. Webhook Handler → Payment Service
+
+Payment Service Gateway-এর নিয়ম অনুযায়ী status, transaction reference, amount ও currency verify করবে। সফল হলে payment `SUCCEEDED` হবে। অনিশ্চিত status হলে reconciliation করব।
+
+##### step: 9\. Payment Service → Booking Service
+
+Verified payment success event Booking Service-এ পাঠাব। Booking এখনও `PENDING_PAYMENT`, seat ownership সঠিক এবং hold বৈধ কি না পুনরায় যাচাই করব। Hold expire হয়ে seat অন্য booking-এ চলে গেলে booking confirm করব না; payment কাটা হয়ে থাকলে `REFUND_PENDING` workflow শুরু করব।
+
+##### step: 10\. Booking Service → PostgreSQL Primary Database
+
+একটি transaction-এ booking `CONFIRMED`, seats `BOOKED`, Ticket Record এবং `outbox_events` তৈরি করব। সব সফল হলে `COMMIT`, অন্যথায় `ROLLBACK`।
+
+এখানে ACID গুরুত্বপূর্ণ:
+
+- Atomicity: সব database update হবে, নয়তো rollback।
+- Consistency: Constraints ও business rules ঠিক থাকবে।
+- Isolation: Concurrent booking থেকে double booking ঠেকাবে।
+- Durability: Commit করা data স্থায়ী থাকবে।
+
+##### step: 11\. Ticket / Notification Service → SMS / Email Gateway
+
+Outbox Worker event process করে Ticket PDF/QR তৈরি এবং notification পাঠাবে। Failure হলে retry করবে; notification failure-এর কারণে confirmed booking বাতিল হবে না।
+
+##### step: 12\. SMS / Email Gateway → Passenger
+
+Passenger confirmation ও ticket details পাবেন। `My Bookings` থেকে ticket দেখা যাবে এবং QR/Ticket ID দিয়ে backend-এ validity verify করা যাবে।
+
+**Simple end-to-end story:** User train search করে চারটি seat select করেন।
+Frontend API-তে booking request পাঠায়। Backend PostgreSQL transaction-এ
+চারটি seat lock করে `HELD` status দেয় এবং ১০ মিনিটের `PENDING_PAYMENT`
+booking তৈরি করে। Payment সফল ও verified হলে booking `CONFIRMED` হয় এবং
+seat `BOOKED` হয়। Payment না হলে expiry worker booking expire করে seat
+release করে।
+
 ### 3.4 Component-এর দায়িত্ব
 
 -   **Client (React/Next.js):** Train search, seat selection, payment
