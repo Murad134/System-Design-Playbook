@@ -144,9 +144,8 @@ flowchart LR
 ```mermaid
 flowchart TB
 
-    subgraph S1["1. Booking Request"]
+    subgraph S1["1. Booking Request →"]
         direction LR
-
         U["Passenger"]
         UI["Next.js Web App"]
         API["Express API"]
@@ -159,9 +158,8 @@ flowchart TB
         AUTH -->|"Validated request"| BOOK
     end
 
-    subgraph S2["2. Pool Matching and Seat Hold"]
-        direction LR
-
+    subgraph S2["← 2. Pool Matching and Seat Hold"]
+        direction RL
         MATCH["Pool Matcher"]
         FARE["Fare Calculator"]
         TX1["Prisma Transaction"]
@@ -171,26 +169,27 @@ flowchart TB
         MATCH -->|"Eligible pool"| FARE
         FARE -->|"Calculate fare"| TX1
         TX1 -->|"Lock / check capacity / create hold"| DB1
-        DB1 -->|"Hold committed"| PAY["Payment Service"]
     end
 
-    subgraph S3["3. Payment Processing"]
-        direction LR
+    DB1 -->|"Hold committed"| PAY
 
+    subgraph S3["3. Payment Processing →"]
+        direction LR
+        PAY["Payment Service"]
         PG["Payment Gateway"]
         WH["Webhook Signature Verification"]
         IDEM["Idempotency and Payment Status Check"]
-        CONFIRM["Booking Confirmation Service"]
 
         PAY -->|"Initiate payment"| PG
         PG -->|"Signed payment callback"| WH
         WH --> IDEM
-        IDEM -->|"Verified successful payment"| CONFIRM
     end
 
-    subgraph S4["4. Confirm Booking"]
-        direction LR
+    IDEM -->|"Verified successful payment"| CONFIRM
 
+    subgraph S4["← 4. Confirm Booking"]
+        direction RL
+        CONFIRM["Booking Confirmation Service"]
         TX2["Prisma Transaction"]
         DB2[("PostgreSQL")]
         STATE["Ride State Machine"]
@@ -200,9 +199,10 @@ flowchart TB
         DB2 -->|"Committed booking state"| STATE
     end
 
-    subgraph S5["5. Events and Notification"]
-        direction LR
+    STATE -->|"Booking confirmed event"| OUTBOX
 
+    subgraph S5["5. Events and Notification →"]
+        direction LR
         OUTBOX["Transactional Outbox"]
         PUB["Outbox Publisher"]
         QUEUE[("Durable Queue")]
@@ -210,7 +210,6 @@ flowchart TB
         NOTIFY["Notification Service"]
         USER2["Passenger receives confirmation"]
 
-        DB2 -->|"Outbox record committed atomically"| OUTBOX
         OUTBOX --> PUB
         PUB --> QUEUE
         QUEUE --> WORKER
@@ -218,21 +217,23 @@ flowchart TB
         NOTIFY -->|"Push / SMS / Email"| USER2
     end
 
-    subgraph S6["6. Failure and Recovery"]
-        direction LR
+    USER2 -->|"Failure recovery / reconciliation"| RECON
 
+    subgraph S6["← 6. Failure and Recovery"]
+        direction RL
+        RECON["Payment Reconciliation"]
         FAIL["Payment Failed / Timed Out"]
         EXPIRE["Hold Expiry Worker"]
         RELEASE["Release Seat Hold"]
-        RECON["Payment Reconciliation"]
 
-        PG -.->|"Failed payment"| FAIL
+        RECON --> DB2
         FAIL --> EXPIRE
         EXPIRE --> RELEASE
         RELEASE --> DB2
-        WORKER --> RECON
-        RECON --> DB2
     end
+
+    PG -.->|"Failed payment"| FAIL
+    WORKER -.-> RECON
 
     classDef user fill:#E1F5EE,stroke:#0F6E56,color:#04342C
     classDef svc fill:#E6F1FB,stroke:#185FA5,color:#042C53
@@ -243,7 +244,6 @@ flowchart TB
     class API,AUTH,BOOK,MATCH,FARE,PAY,WH,IDEM,CONFIRM,STATE,OUTBOX,PUB,WORKER,NOTIFY,TX1,TX2,FAIL,EXPIRE,RELEASE,RECON svc
     class PG ext
     class DB1,DB2,QUEUE db
-
 ```
 
 #### step 1: Passenger ride request পাঠান
