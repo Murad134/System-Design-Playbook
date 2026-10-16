@@ -136,6 +136,143 @@ flowchart TD
     Worker --> UsageDB
 ```
 
+### Arrow follow
+```mermaid
+
+flowchart TB
+
+    %% 1. Customer Request and Authentication
+    subgraph S1["1. Customer Request and Authentication"]
+        direction LR
+
+        U["Customer / Retailer"]
+        APP["Mobile App / USSD / SMS"]
+        G["API Gateway"]
+        AUTH["Authentication and SIM Verification"]
+        C["Customer and SIM Service"]
+
+        U -->|"Recharge / Package / Usage Request"| APP
+        APP -->|"HTTPS / API Request"| G
+        G -->|"Authenticate and Authorize"| AUTH
+        AUTH -->|"Validated Subscriber Context"| C
+    end
+
+    %% 2. Recharge and Package Processing
+    subgraph S2["2. Recharge and Package Processing"]
+        direction TB
+
+        R["Recharge Service"]
+        PG["External Payment Provider"]
+        WH["Webhook Verification and Idempotency"]
+        R2["Recharge Confirmation"]
+        P["Package Purchase Service"]
+        SUB["Subscription and Allowance Service"]
+        W["Wallet and Financial Ledger"]
+
+        G -->|"Recharge Request"| R
+        G -->|"Package Purchase Request"| P
+
+        R -->|"Initiate Payment"| PG
+        PG -->|"Payment Callback"| WH
+        WH -->|"Verified Payment Event"| R2
+        R2 -->|"Credit Recharge Balance"| W
+
+        P -->|"Validate Eligibility and Pricing"| SUB
+        SUB -->|"Check Funds and Activate Package"| W
+    end
+
+    %% 3. Voice SMS and Data Charging
+    subgraph S3["3. Voice, SMS and Data Charging"]
+        direction TB
+
+        NET["Telecom Network"]
+        OC["Online Charging System"]
+        UE["Usage Event Ingestion"]
+        MQ["Durable Message Broker"]
+        W2["Wallet and Financial Ledger"]
+        SUB2["Subscription and Allowance"]
+        WORKER["Reconciliation Workers"]
+
+        NET <-->|"Real-time Authorization / Quota"| OC
+        NET -->|"CDR / Usage Events"| UE
+        UE -->|"Publish Usage Event"| MQ
+        MQ -->|"Usage Event"| OC
+
+        OC -->|"Debit / Reserve Balance"| W2
+        OC -->|"Consume Allowance"| SUB2
+
+        MQ -.->|"Retry / Dead-letter / Reconciliation"| WORKER
+    end
+
+    %% 4. Persistence, Events and Notifications
+    subgraph S4["4. Persistence and Customer Confirmation"]
+        direction TB
+
+        DB[("PostgreSQL")]
+        TX["Transaction Result / Usage Status"]
+        OUTBOX["Transactional Outbox Table"]
+        PUB["Outbox Event Publisher"]
+        NOTIFY["Notification Service"]
+        USER2["Customer"]
+
+        W -->|"Ledger Transaction"| DB
+        SUB -->|"Subscription Transaction"| DB
+        W2 -->|"Charging Transaction"| DB
+        SUB2 -->|"Allowance Transaction"| DB
+
+        DB -->|"Committed State"| TX
+        TX -->|"Create Notification Event in Same Transaction"| OUTBOX
+        OUTBOX --> PUB
+        PUB -->|"Publish Committed Events"| NOTIFY
+        NOTIFY -->|"SMS / Push Notification"| USER2
+
+        WORKER -->|"Reconcile and Persist Corrections"| DB
+    end
+
+    %% Cross-layer business outcomes
+    AUTH -.->|"Authenticated Context"| R
+    AUTH -.->|"Authenticated Context"| P
+
+    R2 -->|"Recharge Result"| TX
+    SUB -->|"Activation Result"| TX
+    OC -->|"Charging Result"| TX
+
+    %% Styling
+    classDef user fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    classDef svc fill:#E6F1FB,stroke:#185FA5,color:#042C53
+    classDef ext fill:#FAEEDA,stroke:#854F0B,color:#412402
+    classDef db fill:#EEEDFE,stroke:#534AB7,color:#26215C
+
+    class U,APP,USER2 user
+    class G,AUTH,C,R,WH,R2,P,SUB,W,OC,UE,MQ,W2,SUB2,WORKER,TX,OUTBOX,PUB,NOTIFY svc
+    class PG,NET ext
+    class DB db
+
+```
+
+### Step-by-step workflow
+#### Step 1: Customer Request
+Customer App, USSD, SMS অথবা Retailer-এর মাধ্যমে recharge, package purchase, balance inquiry বা usage request পাঠায়।
+#### Step 2: Authentication & SIM Verification
+API Gateway request গ্রহণ করে। Authentication Service JWT, SIM status এবং customer permission যাচাই করে।
+#### Step 3: Request Routing
+- Recharge request → Recharge & Payment Service
+- Package purchase → Package & Rating Service
+- Call/SMS/Data usage → Online Charging Service
+#### Step 4: Recharge Processing
+Recharge Service external payment provider-এ payment initiate করে। Webhook Handler callback যাচাই করে এবং idempotency নিশ্চিত করে, যাতে একই payment একাধিকবার process না হয়।
+#### Step 5: Package Purchase
+Package Service balance, package eligibility ও validity যাচাই করে। সফল transaction-এ package subscription তৈরি হয় এবং সংশ্লিষ্ট minute, SMS বা data allowance activate হয়।
+#### Step 6: Voice / SMS / Data Charging
+Telecom Network Online Charging Service-এর কাছে usage authorization বা quota চায়। Service active package, available allowance এবং balance যাচাই করে usage অনুমোদন বা প্রত্যাখ্যান করে।
+#### Step 7: Usage Event Processing
+Network থেকে CDR বা usage event এলে Usage Event Ingestion সেটি Durable Message Broker-এ পাঠায়। Duplicate event শনাক্ত করে charging ও settlement process করা হয়।
+#### Step 8: Database Transaction
+Wallet, ledger, recharge status এবং package allowance-এর প্রয়োজনীয় update PostgreSQL transaction-এর মাধ্যমে commit হয়। ACID properties ও concurrency control financial inconsistency প্রতিরোধ করে।
+#### Step 9: Notification
+Transaction সফলভাবে commit হওয়ার পর event publish হয়। Notification Service customer-কে SMS বা app notification পাঠায়।
+#### Step 10: Reconciliation & Recovery
+Payment timeout, delayed CDR বা processing failure হলে Reconciliation Workers provider status, usage records এবং financial ledger মিলিয়ে দেখে; প্রয়োজন অনুযায়ী retry করে এবং status সংশোধন করে।
 ### Components-এর কাজ
 
 | Component | Responsibility |

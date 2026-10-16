@@ -140,8 +140,199 @@ flowchart LR
   Queue --> Worker
   API --> Logs[Audit logs and monitoring]
 ```
+### Arrow Follow 
+```mermaid
+flowchart TB
+
+    subgraph S1["1. Booking Request"]
+        direction LR
+
+        U["Passenger"]
+        UI["Next.js Web App"]
+        API["Express API"]
+        AUTH["JWT / Authorization / Validation"]
+        BOOK["Booking Service"]
+
+        U -->|"Select pickup and destination"| UI
+        UI -->|"POST /api/rides"| API
+        API --> AUTH
+        AUTH -->|"Validated request"| BOOK
+    end
+
+    subgraph S2["2. Pool Matching and Seat Hold"]
+        direction LR
+
+        MATCH["Pool Matcher"]
+        FARE["Fare Calculator"]
+        TX1["Prisma Transaction"]
+        DB1[("PostgreSQL")]
+
+        BOOK -->|"Find compatible pool"| MATCH
+        MATCH -->|"Eligible pool"| FARE
+        FARE -->|"Calculate fare"| TX1
+        TX1 -->|"Lock / check capacity / create hold"| DB1
+        DB1 -->|"Hold committed"| PAY["Payment Service"]
+    end
+
+    subgraph S3["3. Payment Processing"]
+        direction LR
+
+        PG["Payment Gateway"]
+        WH["Webhook Signature Verification"]
+        IDEM["Idempotency and Payment Status Check"]
+        CONFIRM["Booking Confirmation Service"]
+
+        PAY -->|"Initiate payment"| PG
+        PG -->|"Signed payment callback"| WH
+        WH --> IDEM
+        IDEM -->|"Verified successful payment"| CONFIRM
+    end
+
+    subgraph S4["4. Confirm Booking"]
+        direction LR
+
+        TX2["Prisma Transaction"]
+        DB2[("PostgreSQL")]
+        STATE["Ride State Machine"]
+
+        CONFIRM -->|"Recheck hold and payment state"| TX2
+        TX2 -->|"Confirm booking / persist ledger"| DB2
+        DB2 -->|"Committed booking state"| STATE
+    end
+
+    subgraph S5["5. Events and Notification"]
+        direction LR
+
+        OUTBOX["Transactional Outbox"]
+        PUB["Outbox Publisher"]
+        QUEUE[("Durable Queue")]
+        WORKER["Background Worker"]
+        NOTIFY["Notification Service"]
+        USER2["Passenger receives confirmation"]
+
+        DB2 -->|"Outbox record committed atomically"| OUTBOX
+        OUTBOX --> PUB
+        PUB --> QUEUE
+        QUEUE --> WORKER
+        WORKER --> NOTIFY
+        NOTIFY -->|"Push / SMS / Email"| USER2
+    end
+
+    subgraph S6["6. Failure and Recovery"]
+        direction LR
+
+        FAIL["Payment Failed / Timed Out"]
+        EXPIRE["Hold Expiry Worker"]
+        RELEASE["Release Seat Hold"]
+        RECON["Payment Reconciliation"]
+
+        PG -.->|"Failed payment"| FAIL
+        FAIL --> EXPIRE
+        EXPIRE --> RELEASE
+        RELEASE --> DB2
+        WORKER --> RECON
+        RECON --> DB2
+    end
+
+    classDef user fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    classDef svc fill:#E6F1FB,stroke:#185FA5,color:#042C53
+    classDef ext fill:#FAEEDA,stroke:#854F0B,color:#412402
+    classDef db fill:#EEEDFE,stroke:#534AB7,color:#26215C
+
+    class U,UI,USER2 user
+    class API,AUTH,BOOK,MATCH,FARE,PAY,WH,IDEM,CONFIRM,STATE,OUTBOX,PUB,WORKER,NOTIFY,TX1,TX2,FAIL,EXPIRE,RELEASE,RECON svc
+    class PG ext
+    class DB1,DB2,QUEUE db
+
+```
+
+#### step 1: Passenger ride request পাঠান
+Passenger pickup location, destination এবং প্রয়োজনীয় ride preference নির্বাচন করেন। Next.js frontend POST /api/rides request Express API-তে পাঠায়।
+
+
+
+#### step 2:Authentication ও validation হয়
+Backend JWT, user permission, request data এবং idempotency key যাচাই করে। Invalid request হলে এখানেই reject হয়।
+
+
+
+#### step 3: Pool matching হয়
+Pool Matcher compatible pool খোঁজে। Route compatibility, detour, waiting time এবং available capacity বিবেচনা করে।
+
+
+
+#### step 4: Fare calculate ও seat hold করা হয়
+Fare Calculator server-side fare নির্ধারণ করে। PostgreSQL transaction-এর মধ্যে capacity যাচাই করে seat hold তৈরি করা হয়। Concurrent request থাকলে atomic update, row lock বা উপযুক্ত isolation ব্যবহার করতে হবে।
+
+
+
+#### step 5:Payment initiate হয়
+Payment Service external gateway-তে payment তৈরি করে। Payment pending থাকাকালে seat hold নির্দিষ্ট সময় পর্যন্ত বজায় থাকে।
+
+
+
+#### step 6:Webhook verify করা হয়
+Gateway callback-এর signature, payment reference, amount এবং transaction status যাচাই করা হয়। Idempotency নিশ্চিত করে একই callback দ্বিতীয়বার এলে duplicate credit বা confirmation আটকানো হয়।
+
+
+
+#### step 7:Booking confirm হয়
+Confirmation Service যাচাই করে payment সফল এবং hold এখনও বৈধ কি না। এরপর PostgreSQL transaction-এ booking state ও সংশ্লিষ্ট record commit করা হয়।
+
+
+
+#### step 8:Notification পাঠানো হয়
+একই transaction-এ booking update এবং outbox record persist করা হয়। Publisher committed event queue-তে পাঠায়; worker notification service-কে trigger করে।
+
+
+
+#### step 9:Failure হলে recovery হয়
+Payment ব্যর্থ হলে বা hold expire হলে worker booking ও payment status যাচাই করে প্রয়োজন অনুযায়ী hold release করে। Payment gateway এবং local database-এর status mismatch হলে reconciliation worker তা resolve করে।
 
 **Full flow-এর সারাংশ:** Passenger বা driver frontend থেকে request পাঠায়, backend transaction দিয়ে pool-এর seat hold করে, payment gateway payment নেয়, webhook booking confirm করে এবং worker expiry বা coin reward process করে। PostgreSQL booking, seat, payment এবং coin-এর একমাত্র সত্য উৎস।
+### Problem and solve
+#### ১. Race Condition — একই Seat দুইজন Book করতে চাইলে
+সমাধান:
+1. Database transaction-এর মধ্যে seat availability check করব।
+2. Atomic update বা row locking ব্যবহার করে seat allocate করব।
+3. একজন seat পাবে, অন্যজন 409 Conflict পাবে।
+মূল কথা: Overbooking প্রতিরোধ করব।
+#### ২. Duplicate Payment Callback
+সমাধান:
+1. Payment gateway-এর webhook signature verify করব।
+2. Unique payment reference ও idempotency ব্যবহার করব।
+3. একই callback আবার এলে দ্বিতীয়বার টাকা credit করব না।
+মূল কথা: Duplicate payment processing প্রতিরোধ করব।
+#### ৩. Payment Success, কিন্তু Booking Failure
+সমাধান:
+1. Payment ও booking-এর status আলাদাভাবে track করব।
+2. Payment সফল হলে booking confirm করার চেষ্টা করব।
+3. Booking সম্ভব না হলে recovery workflow চালাব এবং প্রয়োজন হলে refund করব।
+মূল কথা: Payment ও booking-এর consistency বজায় রাখব।
+#### ৪. Server Crash — Response হারিয়ে গেলে
+সমাধান:
+1. প্রতিটি booking request-এর জন্য idempotency key ব্যবহার করব।
+2. Database-এ request-এর result সংরক্ষণ করব।
+3. একই request আবার এলে নতুন booking না বানিয়ে আগের result ফেরত দেব।
+মূল কথা: Duplicate booking প্রতিরোধ করব।
+#### ৫. Hold Expiry — Payment না করলে Seat Release
+সমাধান:
+1. Seat hold-এর সঙ্গে expiry time সংরক্ষণ করব।
+2. Scheduler ও background worker দিয়ে expired hold খুঁজব।
+3. Booking ও payment status যাচাই করে seat release করব।
+মূল কথা: Unused seat অন্য passenger-এর জন্য available করব।
+#### ৬. Notification Failure — SMS না গেলে
+সমাধান:
+1. Booking confirmation ও outbox event একই database transaction-এ সংরক্ষণ করব।
+2. Background worker দিয়ে notification পাঠাব।
+3. ব্যর্থ হলে retry করব; notification failure-এর কারণে booking rollback করব না।
+মূল কথা: Booking নিশ্চিত থাকবে, notification পরে পাঠানো হবে।
+#### ৭. Scaling — অনেক User একসঙ্গে Request করলে
+সমাধান:
+1. Load balancer দিয়ে request একাধিক API server-এ ভাগ করব।
+2. Database query, index ও connection pooling optimize করব।
+3. Background task queue-তে পাঠাব এবং monitoring দিয়ে bottleneck শনাক্ত করব।
+মূল কথা: বেশি traffic সামলাব এবং system-এর performance বজায় রাখব।
 
 ### বাংলা পূর্ণ আর্কিটেকচার
 
