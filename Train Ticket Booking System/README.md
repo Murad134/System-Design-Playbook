@@ -957,107 +957,33 @@ historical relationship কীভাবে সংরক্ষণ হবে, ত�
 
 ## 7. REST API Design
 
-  -----------------------------------------------------------------------------------------------------
-  Method                  Endpoint                                              কাজ
-  ----------------------- ----------------------------------------------------- -----------------------
-  `GET`                   `/api/trains?from=Dhaka&to=Jashore&date=2026-10-15`   Train search
+The following REST APIs support passenger authentication, train search, seat booking, payment processing, and ticket verification.
 
-  `GET`                   `/api/trips/:tripId/seats`                            Seat availability দেখা
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/auth/login` | Passenger login |
+| `GET` | `/api/trains` | Search trains |
+| `GET` | `/api/trips/:tripId/seats` | Check seat availability |
+| `POST` | `/api/bookings` | Create booking and hold seats temporarily |
+| `GET` | `/api/bookings/:id` | Get booking details and status |
+| `POST` | `/api/bookings/:id/payment` | Initiate payment |
+| `GET` | `/api/bookings/:id/payment-status` | Check payment status |
+| `POST` | `/api/payments/webhook` | Receive payment gateway notifications |
+| `POST` | `/api/bookings/:id/cancel` | Request booking cancellation |
+| `GET` | `/api/tickets/:ticketNumber` | Retrieve ticket details |
+| `GET` | `/api/bookings` | View passenger booking history |
+| `POST` | `/api/tickets/:ticketNumber/verify` | Verify ticket or QR code |
 
-  `POST`                  `/api/bookings`                                       Booking তৈরি ও seat
-                                                                                hold
+### Important API Design Considerations
 
-  `GET`                   `/api/bookings/:id`                                   Booking details/status
+- **Authentication:** Protect passenger-specific endpoints using JWT or session-based authentication.
+- **Seat Availability:** Revalidate seat availability during booking to prevent double booking.
+- **Idempotency:** Use idempotency keys for booking and payment initiation to handle duplicate requests safely.
+- **Payment Verification:** Verify payment status on the backend using the payment gateway's supported verification mechanism. Never trust the frontend success redirect alone.
+- **Webhook Security:** Validate webhook authenticity and process duplicate events idempotently.
+- **ACID Transactions:** Use PostgreSQL transactions, appropriate row locking, and database constraints to maintain booking and seat consistency.
+- **Background Workers:** Use background jobs to expire unpaid seat holds, process refunds, and reconcile uncertain payment statuses. These workers do not need public REST endpoints.
 
-  `POST`                  `/api/bookings/:id/payment`                           Payment initiate
-
-  `GET`                   `/api/bookings/:id/payment-status`                    Payment status দেখা
-
-  `POST`                  `/api/payments/webhook`                               Gateway event গ্রহণ
-
-`POST`                  `/api/bookings/:id/cancel`                            Cancellation request
-`GET`                   `/api/tickets/:ticketNumber`                         Ticket details
-  -----------------------------------------------------------------------------------------------------
-
-Expiry worker-এর জন্য public expiry endpoint দরকার নেই; worker
-server-side-এ কাজ করবে।
-
-### 7.1 Create Booking
-
-`POST /api/bookings`
-
-Request:
-
-``` json
-{
-  "tripId": "TRIP-101",
-  "seatIds": ["A1", "A2", "A3", "A4"]
-}
-```
-
-Server trip ও seat যাচাই করবে, server-side fare calculate করবে এবং সব
-seat atomically reserve করার চেষ্টা করবে।
-
-Example response:
-
-``` json
-{
-  "bookingId": "BK-1001",
-  "status": "PENDING_PAYMENT",
-  "seatCount": 4,
-  "totalAmount": 2000,
-  "expiresAt": "2026-10-15T10:10:00Z"
-}
-```
-
-উপরের amount ও timestamp কেবল উদাহরণ। এগুলো server calculate করবে; client
-পাঠানো amount বা expiry-কে বিশ্বাস করা যাবে না। কোনো একটি seat
-unavailable হলে `409 Conflict` দিতে হবে এবং partial reservation রাখা
-যাবে না।
-
-### 7.2 Initiate Payment
-
-`POST /api/bookings/BK-1001/payment`
-
-Request:
-
-``` json
-{
-  "paymentMethod": "gateway"
-}
-```
-
-Example response:
-
-``` json
-{
-  "paymentId": "PAY-501",
-  "status": "PENDING",
-  "paymentUrl": "https://gateway.example/checkout"
-}
-```
-
-Checkout URL নির্বাচিত gateway থেকে আসবে। Retry করলে duplicate charge যেন
-না হয়, সে জন্য idempotency key ব্যবহার করতে হবে।
-
-### 7.3 View Booking
-
-`GET /api/bookings/BK-1001`
-
-Example response:
-
-``` json
-{
-  "bookingId": "BK-1001",
-  "status": "CONFIRMED",
-  "seatNumbers": ["A1", "A2", "A3", "A4"],
-  "paymentStatus": "SUCCEEDED",
-  "totalAmount": 2000
-}
-```
-
-প্রতিটি booking endpoint-এ ownership যাচাই করতে হবে, যেন user অন্য user-এর
-booking access করতে না পারেন।
 
 ## 8. Complete Booking Flow
 
