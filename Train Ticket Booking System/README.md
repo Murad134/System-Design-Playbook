@@ -602,10 +602,14 @@ Verified payment success event Booking Service-এ পাঠাব। Booking �
 
 এখানে ACID গুরুত্বপূর্ণ:
 
-- Atomicity: সব database update হবে, নয়তো rollback।
-- Consistency: Constraints ও business rules ঠিক থাকবে।
-- Isolation: Concurrent booking থেকে double booking ঠেকাবে।
-- Durability: Commit করা data স্থায়ী থাকবে।
+- Atomicity (সব হবে, না হয় কিছুই হবে না): একটা transaction-এর সব কাজ সফল হবে, নাহলে কোনো কাজই save হবে না।
+উদাহরণ: Ticket booking-এর সময় seat book হলো, কিন্তু payment record save হলো না। Transaction rollback হলে seat booking-ও বাতিল হবে।
+- Consistency (Database-এর নিয়ম ঠিক থাকবে): প্রতিটি transaction-এর পর database-এর নিয়ম ঠিক থাকতে হবে।
+উদাহরণ: ট্রেনে ৪০টি seat থাকলে ৪১ নম্বর booking করা যাবে না।
+- Isolation (একসঙ্গে কাজ করলেও সমস্যা হবে না): একাধিক user একই সময়ে booking করলেও database ভুল result হতে দেবে না।
+উদাহরণ: একই seat-এর জন্য দুইজন একসঙ্গে request করলেও seat একজনই পাবে।
+- Durability (Save হলে থেকে যাবে): Transaction একবার successfully commit হলে data database-এ সংরক্ষিত থাকবে, server restart হলেও।
+উদাহরণ: Ticket booking successful হওয়ার পর server বন্ধ হলেও booking-এর data হারিয়ে যাবে না।
 
 ##### step: 11\. Ticket / Notification Service → SMS / Email Gateway
 
