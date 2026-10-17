@@ -223,7 +223,7 @@ flowchart TD
     WORKER_SVC <-->|Sync State| REDIS
 ```
 
-### Full architecture description(what ,Why , Benefit wise)
+### Full architecture description --- ( what ,Why , Benefit wise)
 15-Step System Design: Interview Presentation Breakdown
 #### Step 1: Request Initiation (Passenger Booking Intent)
 কী হচ্ছে (What): প্যাসেঞ্জার ফ্রন্টএন্ড অ্যাপলিকেশন (React/Next.js) থেকে রুটের নাম (Dhaka 
@@ -387,7 +387,7 @@ flowchart TB
     class DB db
 ```
 
-##### Step-by-step workflow (Details)
+##### Step-by-step workflow ( Details )
 ##### 1. Passenger → React / Next.js Web App
 যাত্রী প্রথমে ওয়েব অ্যাপে প্রবেশ করে যাত্রার তারিখ, Departure Station, Destination Station এবং পছন্দের ট্রেন নির্বাচন করে। এরপর অ্যাপ উপলব্ধ সিট দেখায় এবং যাত্রী একটি বা একাধিক সিট নির্বাচন করে বুকিংয়ের অনুরোধ করে।
 - Frontend: React.js / Next.js
@@ -548,7 +548,7 @@ seat `BOOKED` হয়। একই confirmation transaction-এ Ticket record এ
 করে। Payment না হলে expiry worker `PENDING_PAYMENT` booking-কে `EXPIRED`
 করে এবং `HELD` seat `AVAILABLE` করে release করে।
 
-#### Summarized Table for Quick Reference (Interview Answer)
+#### Summarized Table for Quick Reference ( Interview Answer )
 
 Junior Software Engineer · Easy–Medium System Design
 
