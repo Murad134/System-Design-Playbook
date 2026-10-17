@@ -1,6 +1,5 @@
 # Train Ticket Booking System --- System Design
 
-> **ভাষা:** বাংলা\
 > **উদ্দেশ্য:** Software Engineering Interview Preparation\
 > **প্রধান প্রযুক্তি:** Node.js, Express.js, PostgreSQL\
 > **মূল সমস্যা:** একজন user Dhaka থেকে Jashore যাওয়ার জন্য একটি booking-এ
@@ -14,25 +13,23 @@
 1.  [Problem Statement](#1-problem-statement)
 2.  [Requirements](#2-requirements)
 3.  [High-Level Architecture](#3-high-level-architecture)
+3.3 [Important SQL for Interview](#train-ticket-booking-system--important-sql-for-interview)
+    - [Core Booking Queries](#331-core-booking-queries)
+    - [Search, Cancellation এবং Reporting Queries](#332-search-cancellation-এবং-reporting-queries)
+    - [Useful Integrity Constraints এবং Indexes](#333-useful-integrity-constraints-এবং-indexes)
 4.  [Database Design](#4-database-design)
 5.  [Status Management](#5-status-management)
 6.  [ER Diagram](#6-er-diagram)
 7.  [REST API Design](#7-rest-api-design)
 8.  [Complete Booking Flow](#8-complete-booking-flow)
 9.  [Double Booking Prevention](#9-double-booking-prevention)
-10. [১০ মিনিটের Hold ও Expiry
-    Mechanism](#10-১০-মিনিটের-hold-ও-expiry-mechanism)
-11. [Payment Failure ও Delayed
-    Webhook](#11-payment-failure-ও-delayed-webhook)
+10. [১০ মিনিটের Hold ও Expiry Mechanism](#10-১০-মিনিটের-hold-ও-expiry-mechanism)
+11. [Payment Failure ও Delayed Webhook](#11-payment-failure-ও-delayed-webhook)
 12. [Database Transaction](#12-database-transaction)
 13. [ACID Properties](#13-acid-properties)
 14. [Security ও Reliability](#14-security-ও-reliability)
 15. [Scalability ও Performance](#15-scalability-ও-performance)
-16. [Test Cases](#16-test-cases)
-17. [Implementation Plan](#17-implementation-plan)
-18. [Interview-এ বলার মতো সংক্ষিপ্ত
-    উত্তর](#18-interview-এ-বলার-মতো-সংক্ষিপ্ত-উত্তর)
-19. [Final Interview Checklist](#19-final-interview-checklist)
+16. [Interview-এ বলার মতো সংক্ষিপ্ত উত্তর](#18-interview-এ-বলার-মতো-সংক্ষিপ্ত-উত্তর)
 
 ------------------------------------------------------------------------
 
@@ -226,7 +223,7 @@ flowchart TD
     WORKER_SVC <-->|Sync State| REDIS
 ```
 
-### Full architecture description
+### Full architecture description(what ,Why , Benefit wise)
 15-Step System Design: Interview Presentation Breakdown
 #### Step 1: Request Initiation (Passenger Booking Intent)
 কী হচ্ছে (What): প্যাসেঞ্জার ফ্রন্টএন্ড অ্যাপলিকেশন (React/Next.js) থেকে রুটের নাম (Dhaka 
@@ -350,7 +347,7 @@ Prometheus, Grafana, ELK এর মাধ্যমে সিস্টেমে�
 
 সুবিধা (Benefit): ইউজার ট্রাস্ট ও ক্লায়েন্ট এক্সপেরিয়েন্স ভালো থাকে এবং প্রোডাকশন ডাউনটাইম বা মেমোরি লিক দ্রুত সমাধান করা যায়।
 
-#### Summarized Table for Quick Reference
+#### Quick Reference Table (Concepts & Their Purpose)
 ##### Arrow flow
 ```mermaid
 flowchart TB
@@ -390,7 +387,7 @@ flowchart TB
     class DB db
 ```
 
-##### Step-by-step workflow
+##### Step-by-step workflow (Details)
 ##### 1. Passenger → React / Next.js Web App
 যাত্রী প্রথমে ওয়েব অ্যাপে প্রবেশ করে যাত্রার তারিখ, Departure Station, Destination Station এবং পছন্দের ট্রেন নির্বাচন করে। এরপর অ্যাপ উপলব্ধ সিট দেখায় এবং যাত্রী একটি বা একাধিক সিট নির্বাচন করে বুকিংয়ের অনুরোধ করে।
 - Frontend: React.js / Next.js
@@ -551,8 +548,7 @@ seat `BOOKED` হয়। একই confirmation transaction-এ Ticket record এ
 করে। Payment না হলে expiry worker `PENDING_PAYMENT` booking-কে `EXPIRED`
 করে এবং `HELD` seat `AVAILABLE` করে release করে।
 
-#### Summarized Table for Quick Reference
-# Train Ticket Booking System — Interview Answer
+#### Summarized Table for Quick Reference (Interview Answer)
 
 Junior Software Engineer · Easy–Medium System Design
 
@@ -631,11 +627,11 @@ release করে।
 ##### Arrow flow
 ```mermaid
 flowchart TD
-    A["1. Booking Service<br/>Seat Check & Hold<br/>PENDING_PAYMENT"]
-    B["2. Payment Service<br/>Create Payment Record<br/>INITIATED"]
+    A["1. Booking Service<br/>Seat Check & Hold<br/>Status:PENDING_PAYMENT"]
+    B["2. Payment Service<br/>Create Payment Record<br/>Status:INITIATED"]
     C["3. Payment Gateway<br/>Passenger Completes Payment"]
     D["4. Webhook Handler<br/>Verify Payment Success"]
-    E["5. Booking Service<br/>Check Seat Hold Validity<br/>CONFIRMED"]
+    E["5. Booking Service<br/>Check Seat Hold Validity<br/>Status:CONFIRMED"]
 
     A --> B
     B --> C
@@ -1738,43 +1734,6 @@ timestamp/event semantics যাচাই করে state transition enforce ক
 প্রথম version-এ modular monolith + PostgreSQL + background worker যথেষ্ট।
 প্রয়োজন প্রমাণিত হলে microservices বিবেচনা করা যেতে পারে।
 
-## 16. Test Cases
-
-  -----------------------------------------------------------------------
-  Test scenario                       Expected result
-  ----------------------------------- -----------------------------------
-  User চারটি available seat book করেন একটি booking তৈরি হবে; চারটি seat
-                                      hold হবে
-
-  একটি selected seat unavailable      পুরো reservation fail; partial hold
-                                      থাকবে না
-
-  Hold-এর মধ্যে payment সফল            Booking confirm; চারটি seat booked
-
-  Payment fail                        Payment status update;
-                                      policy/deadline অনুযায়ী booking
-                                      resolve হবে
-
-  Deadline-এ payment নেই              Booking expire; seat release
-
-  দুই user একই seat চান                সর্বোচ্চ একজন valid reservation পাবে
-
-  Duplicate payment webhook           Duplicate confirmation/charge
-                                      processing হবে না
-
-  Payment webhook দেরিতে আসে          Payment ও seat ownership নিরাপদে
-                                      reconcile হবে
-
-  User অন্যের booking access করেন      Request denied হবে
-
-  Worker একই booking দুবার process করে Seat release নিরাপদ থাকবে; state
-                                      corrupt হবে না
-
-  Payment success, কিন্তু seat          Double booking নয়;
-  reassigned                          reconciliation/refund policy চলবে
-
-  Client ভুল fare পাঠায়                Server-side fare-ই ব্যবহার হবে
-  -----------------------------------------------------------------------
 ## 18. Interview-এ বলার মতো সংক্ষিপ্ত উত্তর
 
 > আমি Train Ticket Booking System-টি Node.js, Express.js এবং PostgreSQL
