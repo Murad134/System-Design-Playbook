@@ -178,6 +178,95 @@ flowchart TD
     Recon --> DB
 ```
 
+### Arrow follow Diagram
+```mermaid
+flowchart TD
+    Customer["Customer App"]
+    Agent["Agent App"]
+    Admin["Admin Dashboard"]
+
+    Gateway["HTTPS / API Gateway"]
+    Auth["Authentication & KYC"]
+    Transaction["Transaction Service"]
+    Wallet["Wallet & Ledger Service"]
+    Recharge["Recharge & Package Service"]
+    Risk["Risk, Limits & Fraud Checks"]
+
+    DB[("PostgreSQL Primary")]
+    Cache[("Redis Cache")]
+    Outbox["Transactional Outbox"]
+    Queue["Message Queue"]
+    Worker["Background Workers"]
+
+    Provider["External Telecom Recharge Provider"]
+    Notify["SMS / Push Notification"]
+    Recon["Reconciliation Service"]
+
+    Customer --> Gateway
+    Agent --> Gateway
+    Admin --> Gateway
+
+    Gateway --> Auth
+    Auth --> Transaction
+    Transaction --> Risk
+    Transaction --> Wallet
+    Transaction --> Recharge
+
+    Wallet <--> DB
+    Transaction <--> DB
+    Recharge <--> DB
+
+    Gateway -. eligible cached reads .-> Cache
+
+    DB --> Outbox
+    Outbox --> Queue
+    Queue --> Worker
+
+    Worker --> Provider
+    Provider --> Worker
+    Worker --> DB
+    Worker --> Notify
+    Worker --> Recon
+    Recon --> DB
+```
+
+#### Step 1: Apps → API Gateway
+Customer, Agent ও Admin তাদের app থেকে HTTPS request পাঠায়। API Gateway request গ্রহণ করে এবং সঠিক service-এ route করে।
+
+#### Step 2: API Gateway → Authentication & KYC
+User-এর identity, authentication token এবং প্রয়োজনীয় KYC status যাচাই করা হয়। অনুমোদিত request পরবর্তী ধাপে যায়।
+
+#### Step 3: Authentication → Transaction Service
+Transaction Service টাকা transfer, cash-in, cash-out বা recharge-এর মতো operation পরিচালনা করে।
+
+#### Step 4: Transaction → Risk Service
+Transaction-এর limit, fraud risk এবং account restriction যাচাই করা হয়। Check সফল হলে transaction এগিয়ে যায়।
+
+#### Step 5: Transaction → Wallet / Recharge Service
+টাকা পাঠানো বা wallet balance পরিবর্তনের ক্ষেত্রে Wallet Service কাজ করে। Mobile recharge-এর ক্ষেত্রে Recharge Service operator ও package-সংক্রান্ত তথ্য পরিচালনা করে।
+
+#### Step 6: Services ↔ PostgreSQL
+Double arrow (<-->) বোঝায় service database-এ data read ও write—দুটিই করতে পারে। Wallet balance, transaction status ও ledger entries যথাযথ database transaction-এর মাধ্যমে সংরক্ষণ করতে হয়।
+
+#### Step 7: API Gateway ⇢ Redis Cache
+Dotted arrow (-.->) cached read-এর optional path বোঝায়। Frequently accessed, non-sensitive বা উপযুক্ত cached data দ্রুত পাওয়া যায়। Financial balance-এর ক্ষেত্রে cache-কে authoritative source হিসেবে ব্যবহার করা উচিত নয়।
+
+#### Step 8: PostgreSQL → Outbox → Message Queue
+Transaction-এর সঙ্গে সম্পর্কিত event database-এ নির্ভরযোগ্যভাবে সংরক্ষণ করা হয়। Outbox publisher event-টি queue-তে পাঠায়, যাতে asynchronous কাজ করা যায়।
+
+#### Step 9: Queue → Background Workers
+Worker queue থেকে event নিয়ে background task চালায়—যেমন recharge provider-কে request পাঠানো, notification পাঠানো এবং reconciliation শুরু করা।
+
+#### Step 10: Worker ↔ Telecom Provider
+Worker external telecom provider-কে recharge request পাঠায়। Provider response দেয়; Worker সেই response অনুযায়ী recharge status update করে।
+
+#### Step 11: Worker → Notification / Reconciliation
+Worker customer-কে SMS বা push notification পাঠায়। Reconciliation Service internal transaction records-এর সঙ্গে provider-এর records মিলিয়ে দেখে।
+
+#### Step 12: Reconciliation → PostgreSQL
+Reconciliation-এর ফলাফল database-এ সংরক্ষিত হয়। Mismatch হলে সেটি investigation বা correction-এর জন্য চিহ্নিত করা যায়।
+
+
 ## 3.2 Component-এর দায়িত্ব
 
 **1. Customer App — React Native / Flutter / Web**
@@ -548,6 +637,8 @@ Response-এ machine-readable error code থাকা উচিত, যেমন
 | status | VARCHAR/ENUM | ACTIVE/BLOCKED |
 | created_at | TIMESTAMPTZ | Account creation |
 
+users — User-এর account information, mobile number, secure password hash এবং account status সংরক্ষণ করে।
+
 ### 2. `wallet_accounts`
 
 | Column | Type | কাজ |
@@ -568,6 +659,9 @@ CHECK (available_balance_minor >= 0)
 
 `available_balance_minor`-এ টাকা integer minor unit হিসেবে রাখা হবে; floating-point amount ব্যবহার করা হবে না।
 
+wallet_accounts — User-এর wallet, currency, available balance এবং wallet status পরিচালনা করে। Balance integer minor unit-এ রাখা হয়।
+
+
 ### 3. `transactions`
 
 | Column | Type | কাজ |
@@ -583,6 +677,9 @@ CHECK (available_balance_minor >= 0)
 | idempotency_key | VARCHAR | Operation reference |
 | created_at | TIMESTAMPTZ | Creation time |
 
+transactions — Money transfer, cash-in ও mobile recharge-এর মতো financial transaction-এর amount, sender, receiver এবং status সংরক্ষণ করে।
+
+
 ### 4. `ledger_entries`
 
 | Column | Type | কাজ |
@@ -596,13 +693,22 @@ CHECK (available_balance_minor >= 0)
 
 Ledger append-only হবে। পুরোনো entry update/delete করে financial history পরিবর্তন করা যাবে না।
 
+ledger_entries — প্রতিটি financial transaction-এর Debit/Credit entry ও financial history রাখে। এটি append-only, তাই পুরোনো entry পরিবর্তন বা delete করা যাবে না।
+
+
 ### 5. `kyc_records`
 
 User-এর KYC status, verification reference এবং verification metadata রাখবে।
 
+kyc_records — User-এর পরিচয় যাচাইয়ের (KYC) status, verification reference এবং metadata সংরক্ষণ করে।
+
+
 ### 6. `agents`
 
 Agent-এর user reference, agent code, approval status ও operational details রাখবে।
+
+agents — Agent-এর user reference, unique agent code, approval status এবং operational information রাখে।
+
 
 ### 7. `recharge_orders`
 
@@ -614,6 +720,9 @@ Agent-এর user reference, agent code, approval status ও operational details
 - Order status
 - Retry/reconciliation metadata
 
+recharge_orders — Mobile recharge-এর operator, mobile number reference, amount/package, provider reference এবং recharge status সংরক্ষণ করে।
+
+
 ### 8. `packages`
 
 - Operator ID
@@ -624,6 +733,8 @@ Agent-এর user reference, agent code, approval status ও operational details
 - Eligibility
 - Active status
 
+packages — Mobile operator-এর recharge package, price, validity, eligibility এবং active status পরিচালনা করে।
+
 ### 9. `idempotency_keys`
 
 - Request scope
@@ -633,17 +744,27 @@ Agent-এর user reference, agent code, approval status ও operational details
 - Processing/result status
 - Stored response reference
 
+idempotency_keys — একই request retry হলেও duplicate financial transaction তৈরি হওয়া আটকাতে request key, payload hash এবং result reference রাখে।
+
 ### 10. `refunds`
 
 Original transaction ID, refund operation ID, amount, reason, status এবং provider reference রাখবে।
+
+refunds — Original transaction-এর বিপরীতে refund amount, reason, status এবং provider reference সংরক্ষণ করে।
+
 
 ### 11. `outbox_events`
 
 Financial transaction-এর সঙ্গে atomically তৈরি event ও publish status রাখবে।
 
+outbox_events — Financial transaction-এর সঙ্গে একই database transaction-এ তৈরি event সংরক্ষণ করে, যাতে পরে নির্ভরযোগ্যভাবে publish করা যায়।
+
+
 ### 12. `audit_logs`
 
 Administrative action, actor, timestamp, target, reason ও correlation reference রাখবে। PIN, OTP বা access token log করা যাবে না।
+
+audit_logs — Admin-এর action, actor, timestamp, target এবং reason-এর audit history রাখে। PIN, OTP বা access token log করা যাবে না।
 
 ## 6.2 গুরুত্বপূর্ণ Database Constraints
 

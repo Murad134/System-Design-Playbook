@@ -88,6 +88,269 @@ flowchart TB
     Queue --> Notify[Email / SMS Notifications]
     Worker --> PG
 ```
+### Arrow follow
+```mermaid
+
+flowchart TB
+
+    subgraph S1["① Booking Request & Seat Reservation"]
+        direction LR
+        U1["👤 Customer"] -->|"Select movie & seats"| W["React / Next.js<br/>Web App"]
+        W -->|"HTTPS Request"| G["Express API<br/>Gateway & Auth"]
+        G -->|"JWT verified"| B1["Booking Service<br/>(Create Seat Hold)"]
+        B1 -->|"Lock & validate seats"| DB1[("PostgreSQL<br/>Row Locking")]
+        DB1 -->|"Seats HELD<br/>Booking PENDING_PAYMENT"| B1
+    end
+
+    subgraph S2["② Payment Processing"]
+        direction LR
+        P1["Payment Service"] -->|"Initiate payment"| PG["External Payment<br/>Gateway"]
+        PG -->|"Payment callback"| WH["Webhook Handler<br/>(Verify & Deduplicate)"]
+        WH -->|"Verified payment event"| P2["Payment Service<br/>(Payment SUCCEEDED)"]
+    end
+
+    subgraph S3["③ Booking Confirmation & E-Ticket"]
+        direction LR
+        B2["Booking Service<br/>(Finalize Booking)"] -->|"Atomic transaction"| DB2[("PostgreSQL<br/>ACID & Row Locking")]
+        DB2 -->|"Booking CONFIRMED<br/>Seats BOOKED"| N["Notification Service<br/>SMS / Email"]
+        N -->|"E-Ticket / Booking Reference"| U2["👤 Customer<br/>(Receives Ticket)"]
+    end
+
+    B1 ==>|"Start payment after seat hold"| P1
+    P2 ==>|"Verified payment result"| B2
+
+    subgraph S4["④ Reservation Expiry & Recovery"]
+        direction LR
+        EW["Expiry Worker"] -->|"Find expired holds"| DB3[("PostgreSQL")]
+        DB3 -->|"Release valid expired holds"| EW
+        RW["Reconciliation Worker"] -->|"Check UNKNOWN payments"| PG
+        PG -->|"Payment status"| RW
+        RW -->|"Reconcile payment & booking"| DB3
+    end
+
+    classDef user fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    classDef svc fill:#E6F1FB,stroke:#185FA5,color:#042C53
+    classDef ext fill:#FAEEDA,stroke:#854F0B,color:#412402
+    classDef db fill:#EEEDFE,stroke:#534AB7,color:#26215C
+    classDef worker fill:#FBEAF0,stroke:#993556,color:#4B1528
+
+    class U1,U2 user
+    class W,G,B1,B2,P1,P2,N svc
+    class PG,WH ext
+    class DB1,DB2,DB3 db
+    class EW,RW worker
+
+```
+### Cinema Hall Seat Booking System — Step-by-Step Workflow & SQL
+Junior Software Engineer · Easy–Medium System Design · PostgreSQL
+সিনেমা হলের আসন বুকিং সিস্টেমে মূল লক্ষ্য হলো: একই seat যেন একই show-এর জন্য একাধিক customer বুক করতে না পারে, payment সঠিকভাবে verify হয় এবং payment না হলে নির্দিষ্ট সময় পর seat আবার available হয়ে যায়।
+#### Step:1. End-to-end workflow
+Customer → React / Next.js
+Customer movie, cinema, showtime ও seat select করে। Frontend available seats দেখায়, কিন্তু এই availability final নয়।
+
+
+
+#### Step:2 Frontend → HTTPS → Express API
+POST /api/bookings request পাঠাবে। Backend authentication, input validation এবং Idempotency-Key check করবে, যাতে retry করলে duplicate booking না হয়।
+
+#### Step:3Booking Service → PostgreSQL
+Transaction শুরু করে selected seats lock করবে। সব seat available থাকলে booking তৈরি হবে PENDING_PAYMENT status-এ এবং seat-গুলো ১০ মিনিটের জন্য HELD হবে।
+
+#### Step:4Booking Service → Payment Service → Payment Gateway
+Backend amount verify করে payment record তৈরি করবে। Customer bKash/SSLCommerz বা অন্য supported gateway-তে payment সম্পন্ন করবে।
+
+#### Step:5Webhook Handler → Payment Verification
+Gateway-এর callback/webhook-এর authenticity, transaction reference, amount এবং currency verify করবে। শুধু frontend-এর success page দেখে payment সফল ধরা হবে না।
+
+#### Step:6Booking Confirmation → PostgreSQL
+Payment verified এবং hold valid থাকলে একই transaction-এ booking CONFIRMED, seats BOOKED এবং ticket record তৈরি হবে।
+
+#### Step:7Ticket Service → Customer
+Email/SMS-এ booking reference বা QR ticket পাঠাবে। Notification fail করলেও confirmed booking বাতিল হবে না।
+
+#### Step:8Expiry Worker → Seat Release
+১০ মিনিটে payment complete না হলে worker booking expire করবে এবং সেই booking-এর held seats আবার AVAILABLE করবে।
+
+
+### Cinema Hall Seat Booking System — Short SQL for Interview
+
+## 1. Find Available Seats
+
+```sql
+SELECT id, seat_id, price
+FROM show_seats
+WHERE show_id = 101
+  AND status = 'AVAILABLE';
+```
+
+Description: নির্দিষ্ট show-এর কোন seat-গুলো খালি আছে তা বের করে। এটি শুধু display-এর জন্য; booking-এর সময় availability আবার যাচাই করতে হবে।
+
+## 2. Lock Seats
+
+```sql
+SELECT id, status
+FROM show_seats
+WHERE id IN (101, 102)
+ORDER BY id
+FOR UPDATE;
+```
+
+Description: `FOR UPDATE` transaction চলাকালে selected seat-এর row lock করে, যাতে concurrent booking নিরাপদভাবে handle করা যায়। এরপর সব seat available কি না যাচাই করতে হবে।
+
+## 3. Create Booking
+
+```sql
+INSERT INTO bookings
+    (user_id, show_id, status, total_amount, expires_at)
+VALUES
+    (1, 101, 'PENDING_PAYMENT', 500,
+     NOW() + INTERVAL '10 minutes')
+RETURNING id;
+```
+
+Description: Payment-এর আগে pending booking তৈরি করে এবং ১০ মিনিটের payment deadline নির্ধারণ করে।
+
+## 4. Hold Seats
+
+```sql
+UPDATE show_seats
+SET status = 'HELD',
+    booking_id = 501,
+    hold_expires_at = NOW() + INTERVAL '10 minutes'
+WHERE id IN (101, 102)
+  AND status = 'AVAILABLE'
+RETURNING id;
+```
+
+Description: Seat-গুলো সাময়িকভাবে reserve করে। সব selected seat update না হলে পুরো transaction `ROLLBACK` করতে হবে।
+
+## 5. Confirm Booking
+
+```sql
+UPDATE bookings
+SET status = 'CONFIRMED',
+    expires_at = NULL
+WHERE id = 501
+  AND status = 'PENDING_PAYMENT'
+  AND expires_at > NOW()
+RETURNING id;
+```
+
+Description: Verified payment সফল হওয়ার পরে এবং hold valid থাকলে booking confirm করে। একই transaction-এ সংশ্লিষ্ট seats-কে `BOOKED` করতে হবে।
+
+## 6. Book Seats Permanently
+
+```sql
+UPDATE show_seats
+SET status = 'BOOKED',
+    hold_expires_at = NULL
+WHERE booking_id = 501
+  AND status = 'HELD'
+RETURNING id;
+```
+
+Description: Booking-এর held seats স্থায়ীভাবে booked করে। Booking confirmation-এর সঙ্গে একই transaction-এ চালাতে হবে।
+
+## 7. Expire Booking
+
+```sql
+UPDATE bookings
+SET status = 'EXPIRED'
+WHERE id = 501
+  AND status = 'PENDING_PAYMENT'
+  AND expires_at <= NOW()
+RETURNING id;
+```
+
+Description: Payment deadline শেষ হলে pending booking expire করে। এরপর একই transaction-এ held seats release করতে হবে।
+
+## 8. Release Seats
+
+```sql
+UPDATE show_seats
+SET status = 'AVAILABLE',
+    booking_id = NULL,
+    hold_expires_at = NULL
+WHERE booking_id = 501
+  AND status = 'HELD';
+```
+
+Description: Expired booking-এর seats আবার available করে। Booking expire করা ও seat release—দুটিই একই transaction-এ করতে হবে।
+
+## 9. Prevent Duplicate Webhook
+
+```sql
+INSERT INTO payment_webhook_events
+    (provider, event_id, payload)
+VALUES
+    ('BKASH', 'evt_123', '{}'::jsonb)
+ON CONFLICT (provider, event_id) DO NOTHING;
+```
+
+Description: একই payment webhook event যেন একাধিকবার record না হয় তা নিশ্চিত করে। এর জন্য `(provider, event_id)`-তে `UNIQUE` constraint প্রয়োজন।
+
+## 10. Booking History
+
+```sql
+SELECT id, status, total_amount, created_at
+FROM bookings
+WHERE user_id = 1
+ORDER BY created_at DESC;
+```
+
+Description: নির্দিষ্ট user-এর সব booking ও booking status দেখায়।
+
+## 11. Transaction
+
+```
+BEGIN;
+
+-- Lock and validate seats
+-- Create booking and hold seats
+-- Check affected row counts
+
+COMMIT;
+-- On failure: ROLLBACK;
+```
+
+Description: একাধিক SQL operation-কে একটি atomic unit হিসেবে পরিচালনা করে। কোনো গুরুত্বপূর্ণ step ব্যর্থ হলে `ROLLBACK` করতে হবে, যাতে partial booking না থাকে।
+
+## 12. Prevent Duplicate Seat Allocation
+
+```sql
+ALTER TABLE show_seats
+ADD CONSTRAINT unique_show_seat
+UNIQUE (show_id, seat_id);
+```
+
+Description: একই show-তে একই physical seat-এর একাধিক inventory row তৈরি হওয়া আটকায়। এটি একাই concurrent booking আটকায় না; row locking ও status validation-ও প্রয়োজন।
+
+## Interview-এর জন্য সবচেয়ে গুরুত্বপূর্ণ ৫টি
+SQL concept
+
+এক লাইনে কাজ
+
+`SELECT ... FOR UPDATE`
+
+Concurrent booking-এর সময় seat row lock করে।
+
+`INSERT INTO bookings`
+
+Pending booking তৈরি করে।
+
+`UPDATE ... SET status = 'HELD'`
+
+Seat সাময়িকভাবে reserve করে।
+
+`UPDATE ... SET status = 'CONFIRMED'`
+
+Verified payment-এর পরে booking confirm করে।
+
+`BEGIN / COMMIT / ROLLBACK`
+
+Database operation-গুলো atomic রাখে।
+
+মনে রাখবে: Payment success webhook verify না করে booking confirm করবে না। আর seat hold, booking expiry ও seat release-এর ক্ষেত্রে transaction এবং affected-row validation ব্যবহার করবে।
 
 ### Components
 

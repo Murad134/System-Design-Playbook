@@ -183,6 +183,14 @@ PostgreSQL ব্যবহার করব, কারণ order, payment এব�
 | `role` | VARCHAR(20) | `CUSTOMER`, `SELLER`, `ADMIN` |
 | `created_at` | TIMESTAMPTZ | NOT NULL |
 
+কাজ: Customer, Seller এবং Admin-এর account information সংরক্ষণ করে।
+- id — User-এর unique ID
+- name, email — পরিচিতির তথ্য
+- password_hash — hashed password
+- role — CUSTOMER, SELLER অথবা ADMIN
+উদাহরণ: একজন seller login করে নিজের product manage করবে।
+
+
 ### 5.2 `products`
 
 | Column | Type | Rule |
@@ -197,6 +205,13 @@ PostgreSQL ব্যবহার করব, কারণ order, payment এব�
 | `created_at` | TIMESTAMPTZ | NOT NULL |
 | `updated_at` | TIMESTAMPTZ | NOT NULL |
 
+
+কাজ: Seller-এর product details সংরক্ষণ করে।
+- seller_id — কোন seller product-এর মালিক
+- name, description — Product details
+- price_minor, currency — Price ও currency
+- status — ACTIVE, INACTIVE ইত্যাদি
+উদাহরণ: Seller একটি mobile phone-এর নাম, দাম এবং description যোগ করল।
 ### 5.3 `inventory`
 
 | Column | Type | Rule |
@@ -208,6 +223,12 @@ PostgreSQL ব্যবহার করব, কারণ order, payment এব�
 
 `available_qty` নতুন order-এর জন্য available stock। `reserved_qty` active reservation-এ থাকা stock।
 
+কাজ: প্রতিটি product-এর available ও reserved stock হিসাব রাখে।
+- product_id — কোন product-এর stock
+- available_qty — নতুন order-এর জন্য অবশিষ্ট stock
+- reserved_qty — payment-এর অপেক্ষায় reservation-এ থাকা stock
+উদাহরণ: Stock 10টি। একজন customer 2টি checkout করলে available stock 8 এবং reserved stock 2 হবে।
+
 ### 5.4 `carts`
 
 | Column | Type | Rule |
@@ -217,6 +238,11 @@ PostgreSQL ব্যবহার করব, কারণ order, payment এব�
 | `status` | VARCHAR(20) | `ACTIVE`, `CONVERTED`, `ABANDONED` |
 | `updated_at` | TIMESTAMPTZ | NOT NULL |
 
+কাজ: Customer-এর shopping cart-এর মূল record রাখে।
+- id — Cart ID
+- user_id — Cart-এর মালিক
+- status — ACTIVE, CONVERTED অথবা ABANDONED
+উদাহরণ: Customer-এর বর্তমান shopping cart চিহ্নিত করে।
 ### 5.5 `cart_items`
 
 | Column | Type | Rule |
@@ -225,6 +251,13 @@ PostgreSQL ব্যবহার করব, কারণ order, payment এব�
 | `product_id` | UUID | FK → `products.id` |
 | `quantity` | INTEGER | `> 0` |
 | `added_at` | TIMESTAMPTZ | NOT NULL |
+
+কাজ: Cart-এর মধ্যে কোন product কত quantity আছে, তা রাখে।
+- cart_id — কোন cart
+- product_id — কোন product
+- quantity — কতটি product
+উদাহরণ: Cart-এ 2টি shirt এবং 1টি headphone আছে।
+মনে রাখবে: Cart-এর price চূড়ান্ত নয়। Checkout-এর সময় backend database থেকে current price আবার যাচাই করবে।
 
 **Constraint:** `PRIMARY KEY (cart_id, product_id)`। Cart-এর price authoritative নয়; checkout-এ price আবার database থেকে পড়তে হবে।
 
@@ -246,6 +279,13 @@ PostgreSQL ব্যবহার করব, কারণ order, payment এব�
 
 **Constraint:** `UNIQUE(user_id, idempotency_key)`। একই key-তে ভিন্ন payload এলে `409 Conflict`।
 
+কাজ: Customer-এর মূল order record এবং order-এর বর্তমান অবস্থা সংরক্ষণ করে।
+- id — Order ID
+- user_id — কে order করেছে
+- status — PENDING_PAYMENT, CONFIRMED, EXPIRED ইত্যাদি
+- subtotal_minor, discount_minor, shipping_minor, total_minor — Order-এর আর্থিক হিসাব
+- idempotency_key — একই checkout request retry হলে duplicate order আটকাতে সাহায্য করে
+উদাহরণ: Customer-এর Order #101 payment-এর অপেক্ষায় আছে।
 ### 5.7 `order_items`
 
 | Column | Type | Rule |
@@ -260,6 +300,15 @@ PostgreSQL ব্যবহার করব, কারণ order, payment এব�
 
 Price এবং name snapshot রাখতে হবে, যাতে পরে product update হলেও পুরোনো order বদলে না যায়।
 
+
+কাজ: একটি order-এর মধ্যে কোন কোন product, কী দামে এবং কত quantity-তে কেনা হয়েছে, তার বিস্তারিত রাখে।
+- order_id — কোন order-এর item
+- product_id — কোন product
+- product_name_snapshot — কেনার সময়কার product name
+- unit_price_minor — কেনার সময়কার unit price
+- quantity, line_total_minor — Quantity ও item-এর মোট দাম
+উদাহরণ: Order #101-এ 2টি shirt, প্রতিটি 500 টাকা দামে কেনা হয়েছিল।
+কেন snapshot দরকার? পরে seller product-এর নাম বা দাম পরিবর্তন করলেও পুরোনো order-এর তথ্য অপরিবর্তিত থাকবে।
 ### 5.8 `payments`
 
 | Column | Type | Rule |
@@ -277,6 +326,13 @@ Price এবং name snapshot রাখতে হবে, যাতে পরে 
 
 **Constraint:** `UNIQUE(provider, provider_payment_id)`।
 
+কাজ: Payment attempt এবং payment gateway-এর reference সংরক্ষণ করে।
+- order_id — কোন order-এর payment
+- provider — Payment gateway-এর নাম
+- provider_payment_id — Gateway-এর payment reference
+- amount_minor, currency — Payment amount ও currency
+- status — PENDING, SUCCEEDED, FAILED ইত্যাদি
+উদাহরণ: Customer-এর Order #101-এর payment সফল হয়েছে কি না, তা এখানে রাখা হয়।
 ### 5.9 `coupons`
 
 | Column | Type | Rule |
@@ -291,6 +347,13 @@ Price এবং name snapshot রাখতে হবে, যাতে পরে 
 | `expires_at` | TIMESTAMPTZ | NOT NULL |
 | `status` | VARCHAR(20) | `ACTIVE`, `INACTIVE` |
 
+কাজ: Discount coupon-এর নিয়ম ও validity সংরক্ষণ করে।
+- code — Coupon code, যেমন SAVE10
+- discount_type — Percentage অথবা fixed discount
+- discount_value — Discount-এর পরিমাণ
+- max_redemptions, redeemed_count — ব্যবহারের limit ও বর্তমান সংখ্যা
+- starts_at, expires_at — Coupon কখন থেকে কখন পর্যন্ত valid
+উদাহরণ: SAVE10 coupon ব্যবহার করে customer 10% discount পেতে পারে, যদি coupon-এর নিয়ম পূরণ হয়।
 ### 5.10 `coupon_redemptions`
 
 | Column | Type | Rule |
@@ -304,6 +367,12 @@ Price এবং name snapshot রাখতে হবে, যাতে পরে 
 
 Policy অনুযায়ী `UNIQUE(coupon_id, user_id)` বা `UNIQUE(order_id)` রাখা যায়।
 
+কাজ: কোন user কোন order-এ coupon ব্যবহার করেছে এবং তার redemption status কী, তা রাখে।
+- coupon_id — কোন coupon
+- user_id — কোন customer
+- order_id — কোন order
+- status — RESERVED, REDEEMED, RELEASED
+উদাহরণ: Checkout-এর সময় coupon reserve করা হলো। Payment সফল হলে policy অনুযায়ী সেটি redeemed হবে; checkout expire হলে release করা যাবে।
 ### 5.11 `stock_reservations`
 
 | Column | Type | Rule |
@@ -315,6 +384,11 @@ Policy অনুযায়ী `UNIQUE(coupon_id, user_id)` বা `UNIQUE(order_i
 | `created_at` | TIMESTAMPTZ | NOT NULL |
 | `updated_at` | TIMESTAMPTZ | NOT NULL |
 
+কাজ: একটি order-এর জন্য stock কতক্ষণ ধরে রাখা হবে এবং reservation-এর বর্তমান অবস্থা কী, তা রাখে।
+- order_id — কোন order-এর reservation
+- status — ACTIVE, CONFIRMED, RELEASED, EXPIRED
+- expires_at — Reservation-এর deadline
+উদাহরণ: Payment-এর জন্য 10 মিনিট stock ধরে রাখা হলো। সময় শেষ হলে reservation expire হতে পারে।
 ### 5.12 `stock_reservation_items`
 
 | Column | Type | Rule |
@@ -325,6 +399,12 @@ Policy অনুযায়ী `UNIQUE(coupon_id, user_id)` বা `UNIQUE(order_i
 
 **Primary key:** `(reservation_id, product_id)`।
 
+
+কাজ: Reservation-এ কোন product-এর কত quantity আটকে রাখা হয়েছে, তা সংরক্ষণ করে।
+- reservation_id — কোন reservation
+- product_id — কোন product
+- quantity — কতটি stock reserve হয়েছে
+উদাহরণ: একটি reservation-এ 2টি shirt এবং 1টি headphone reserve করা হয়েছে।
 ### 5.13 `payment_webhook_events`
 
 | Column | Type | Rule |
@@ -339,6 +419,13 @@ Policy অনুযায়ী `UNIQUE(coupon_id, user_id)` বা `UNIQUE(order_i
 
 **Constraint:** `UNIQUE(provider, event_id)`।
 
+কাজ: Payment gateway থেকে আসা webhook event-এর record রাখে, যাতে duplicate event processing এড়ানো যায় এবং processing status track করা যায়।
+- provider — Gateway-এর নাম
+- event_id — Gateway event-এর unique ID
+- event_type — Event-এর ধরন
+- status — RECEIVED, PROCESSED, FAILED
+- received_at, processed_at — Event পাওয়ার ও processing-এর সময়
+উদাহরণ: Gateway একই payment-success webhook দুইবার পাঠালে unique (provider, event_id) constraint duplicate event আটকাতে সাহায্য করে।
 ### 5.14 `outbox_events`
 
 | Column | Type | Rule |
@@ -351,6 +438,13 @@ Policy অনুযায়ী `UNIQUE(coupon_id, user_id)` বা `UNIQUE(order_i
 | `published_at` | TIMESTAMPTZ | Nullable |
 | `created_at` | TIMESTAMPTZ | NOT NULL |
 
+কাজ: Order বা payment-এর database transaction-এর সঙ্গে সম্পর্কিত event নির্ভরযোগ্যভাবে সংরক্ষণ করে, যাতে পরে worker সেটি process করতে পারে।
+- aggregate_type — যেমন ORDER
+- aggregate_id — সংশ্লিষ্ট order-এর ID
+- event_type — কী ঘটনা ঘটেছে
+- payload — Event-এর data
+- published_at — Event publish হয়েছে কি না
+উদাহরণ: Order তৈরি হওয়ার পর notification পাঠানোর event outbox-এ রাখা হয়। পরে worker সেটি queue-তে publish করতে পারে।
 ### 5.15 `shipments`
 
 | Column | Type | Rule |
@@ -363,6 +457,12 @@ Policy অনুযায়ী `UNIQUE(coupon_id, user_id)` বা `UNIQUE(order_i
 | `created_at` | TIMESTAMPTZ | NOT NULL |
 | `updated_at` | TIMESTAMPTZ | NOT NULL |
 
+কাজ: Order-এর delivery ও tracking information সংরক্ষণ করে।
+- order_id — কোন order পাঠানো হচ্ছে
+- carrier — Courier বা delivery provider
+- tracking_number — Delivery tracking number
+- status — Delivery-এর বর্তমান অবস্থা
+উদাহরণ: Order SHIPPED হলে customer tracking number ব্যবহার করে delivery progress দেখতে পারবে।
 ### গুরুত্বপূর্ণ index
 
 - `orders(user_id, created_at DESC)`
@@ -764,3 +864,219 @@ ACID database-এর ভেতরের transaction guarantee করে; externa
 ### Interview-এ ৩০ সেকেন্ডের উত্তর
 
 > Atomicity দিয়ে stock reservation, order এবং order items একসঙ্গে commit বা rollback করব। Consistency-এর জন্য foreign key, check এবং unique constraint থাকবে। Isolation-এর জন্য conditional stock update বা row lock ব্যবহার করব। Durability PostgreSQL commit ও backup/recovery দিয়ে নিশ্চিত হবে। External payment gateway database transaction-এর অংশ নয়, তাই signed webhook, idempotency এবং reconciliation ব্যবহার করব।
+
+### E-commerce System Design Interview: ১৩টি গুরুত্বপূর্ণ প্রশ্ন ও উত্তর
+#### Q1. How do you handle the last-item race condition during high concurrency?
+সমস্যা: Stock মাত্র ১টি, কিন্তু একই সময়ে ১,০০০ জন customer checkout করছে। একাধিক request একই stock দেখতে পেলে overselling বা negative stock হতে পারে।
+
+স্যার, এটি একটি ক্লাসিক Concurrent Race Condition প্রবলেম। একই সাথে ১,০০০ জন ইউজার ১টি প্রোডাক্ট কিনতে চাইলে 'Read then Write' অ্যাপ্রোচ ব্যবহার করলে Overselling হবে। এটি আটকাতে আমি ৩টি লেয়ারে সমাধান বাস্তবায়ন করব:
+##### ১. Database-level Atomic Conditional Update:
+আমি ডাটাবেজ থেকে আলাদাভাবে স্টক রিড করে কোডে বিয়োগ করব না। বরং একটিমাত্র Atomic SQL Statement চালাব, যা একসাথে স্টক চেক এবং ডিক্রিমেন্ট করবে:
+```sql
+UPDATE inventory
+SET available_stock = available_stock - 1
+WHERE product_id = :product_id AND available_stock >= 1
+RETURNING product_id;
+```
+##### ২. Row-Level Locking & Serialization:
+
+যখন ১,০০০টি কানেকশন একই সাথে এই SQL চালাবে, ডাটাবেজ ইঞ্জিনের Row-Level Lock মেকানিজম তাদের মাইক্রো-সেকেন্ডের ব্যবধানে Serialize (লাইক কিউতে (FIFO) একটার পর একটা প্রসেস) করবে।
+
+যে ১ম রিকোয়েস্ট নিয়ে ঢুকবে, তার ক্ষেত্রে শর্ত মিলবে এবং স্টক 1-> 0 হবে। SQL-এর RETURNING product_id থেকে ১টি রো ফেরত আসবে—অর্থাৎ তার বুকিং সফল।
+
+২য় থেকে ১০০০তম রিকোয়েস্টের জন্য WHERE available_stock >= 1 শর্তটি আর মিলবে না। ফলে কোনো রো ফেরত আসবে না এবং ব্যাকএন্ড সাথে সাথে তাদের Out of Stock রেসপন্স দিয়ে রিজেক্ট করবে।
+##### ৩. Database Hard Check Constraint (Final Guardrail):
+নিরাপত্তার শেষ ধাপ হিসেবে ডাটাবেজ টেবিলে একটি Check Constraint যুক্ত রাখব:
+```sql
+ALTER TABLE inventory ADD CONSTRAINT non_negative_stock CHECK (available_stock >= 0);
+```
+ব্যাকএন্ড কোডে কোনো বাগ থাকলেও ডাটাবেজ নিজে থেকে কখনো স্টক ০-এর নিচে নামতে দেবে না।
+
+ফলাফল: এই আর্কিটেকচারে শতভাগ গ্যারান্টিসহ Zero Overselling নিশ্চিত হবে এবং কেবল বিজয়ী ১ম ইউজারই প্রোডাক্টটি পাবেন।
+
+#### Q2. In a high-concurrency purchase request, who gets the item and how is it decided?
+সমস্যা: হাজার জন একই সময়ে কিনতে চাইলে backend কীভাবে winner নির্ধারণ করবে?
+"হাজার হাজার ইউজারের মধ্যে কে প্রোডাক্টটি পাবে, তা নির্ধারিত হয় 'First-Come, First-Served' ভিত্তিতে এবং এটি ৪টি স্তরে সিকিউর করা হয়:
+
+১. API Gateway (Validation & Rate-Limiting):
+
+গেটওয়ে স্প্যামিং বা বটের রিকোয়েস্টগুলো ফিল্টার করে এবং রেট-লিমিটিংয়ের মাধ্যমে অপ্রয়োজনীয় ট্রাফিক ব্লক করে দেয়।
+
+২. Virtual Waiting Room (Fairness & Traffic Control):
+
+ফ্ল্যাশ সেলের সময় লাখ লাখ ইউজারকে সরাসরি ডাটাবেজে না পাঠিয়ে একটি কিউ বা ওয়েটিং রুমে (FIFO) দাঁড় করানো হয়, যাতে সার্ভার ক্র্যাশ না করে।
+
+৩. Inventory Microservice (Decoupled Processing):
+
+বৈধ রিকোয়েস্টগুলো ডেডিকেটেড ইনভেনটরি সার্ভিসে পাঠানো হয়, যা শুধু স্টক লকিং ও আপডেট খুব দ্রুত হ্যান্ডেল করে।
+
+৪. Database Atomic Update & Row-Level Locking (The Winner Decider):
+
+ডাটাবেজে একটিমাত্র অ্যাটমিক কুয়েরি চালানো হয়:
+
+```sql
+UPDATE inventory SET available_stock = available_stock - 1 
+WHERE product_id = :id AND available_stock >= 1 RETURNING product_id;
+```
+ডাটাবেজের Row-Level Lock রিকোয়েস্টগুলোকে সিরিয়ালাইজ (Serialize) করে। মাইক্রো-সেকেন্ডের ব্যবধানে যে রিকোয়েস্ট সবার আগে ডেটাবেজে পৌঁছাবে, কেবল সে-ই RETURNING ডেটা পাবে এবং বিজয়ী হবে। বাকিদের রিকোয়েস্ট 0 rows affected হয়ে তাৎক্ষণিকভাবে রিজেক্ট হয়ে যাবে।
+
+#### Q3. How do you handle temporary stock reservation and cleanup of expired locks?
+সমস্যা: Checkout শুরু করার পর customer ১০ মিনিটের মধ্যে payment না করলে stock যেন অনির্দিষ্টকাল আটকে না থাকে।
+
+#### Q4. How do you show real-time stock updates without overloading the database?
+সমস্যা: হাজার হাজার customer product page দেখছে। প্রত্যেকের browser বারবার database query করলে database load বাড়বে।
+Interview answer:
+“আমি stock update-এর জন্য event-driven architecture ব্যবহার করব। Inventory reservation সফল হলে backend একটি stock-change event publish করবে। WebSocket বা SSE দিয়ে connected client-দের update পাঠাব।”
+
+Flow:
+
+Inventory DB: Reservation Commit  ----> Outbox / Event Broker  ----> WebSocket / SSE Server ----> Connected clients update UI
+
+
+- Stock event broadcast করার জন্য Redis Pub/Sub বা durable broker ব্যবহার করা যায়।
+- UI-তে optimistic update করা গেলেও reservation নিশ্চিত হওয়ার আগে stock কমেছে বলে final state দেখাব না।
+- Reconnect হলে authoritative stock state আবার fetch করব।
+- Checkout-এর সময় সবসময় database-এ availability পুনরায় যাচাই করব।
+মনে রাখবে: Real-time UI synchronization এবং overselling prevention দুটি আলাদা সমস্যা।
+
+#### Q5. How do you handle the race condition between cron expiry and a late payment webhook?
+সমস্যা: ১০ মিনিট পার হওয়ায় expiry worker reservation release করছে, ঠিক সেই সময়ে payment success webhook এসেছে।
+
+Interview answer:
+
+“আমি reservation এবং payment state transition database transaction ও conditional update দিয়ে synchronize করব। Expiry worker এবং webhook handler—দুজনেই একই reservation-এর বর্তমান state যাচাই করবে। শুধু সময় পার হয়েছে বলে reservation release বা payment confirmation অন্ধভাবে execute করব না।”
+ধরা যাক:
+- 12:00:00 — Reservation তৈরি হলো।
+- 12:10:00 — Reservation expire হলো।
+- 12:10:01 — Expiry worker stock release করল।
+- 12:10:05 — Payment success webhook এলো।
+
+এখন webhook handler:
+- 1. Gateway থেকে payment status verify করবে।
+- 2. Reservation এবং order state পরীক্ষা করবে।
+- 3. Reservation এখনও বৈধ এবং stock allocation সম্ভব হলে order confirm করার workflow চালাবে।
+- 4. Reservation ইতিমধ্যে release হয়ে অন্য customer-কে stock দেওয়া হলে একই stock দ্বিতীয়বার বরাদ্দ করবে না।
+- 5. Payment সফল হলেও order fulfill করা অসম্ভব হলে refund workflow শুরু করবে।
+Race condition কীভাবে আটকাব?
+একই transaction-এ conditional status transition এবং inventory update করব। প্রয়োজন অনুযায়ী row locking বা optimistic concurrency control ব্যবহার করব। একটি transition সফল হলে অন্যটি নতুন state দেখে সিদ্ধান্ত নেবে।
+
+#### Q6. How do you handle stock reconciliation and automated refunds via payment gateway APIs?
+সমস্যা: Late webhook-এর সময় stock আর available নেই, কিন্তু customer-এর payment সফল হয়েছে।
+
+Interview answer:
+"পেমেন্ট সফল হওয়ার পরও যদি স্টক বা সিট ফাঁকা না পাওয়া যায়, তবে সিস্টেমকে ইউজারের টাকা ফেরত দিতে হবে। তবে এখানে একটা বড় টেকনিক্যাল চ্যালেঞ্জ হলো—পেমেন্ট গেটওয়ের রিফান্ড এপিআই কল এবং ডাটাবেজ ট্রানজেকশন কখনো একসাথে অ্যাটমিক (Atomic) হতে পারে না। এটি হ্যান্ডেল করার জন্য আমি একটি রিলায়াবেল এবং সিকিউর রিফান্ড ওয়ার্কফ্লো ব্যবহার করব:
+
+১. Validation & Event Persistence:
+
+ওয়েব হুক আসার পর সিগনেচার ও ট্রানজেকশন ডিটেইলস ভেরিফাই করে পেমেন্ট সাকসেস ইভেন্টটি ডাটাবেজে সেভ করব।
+
+২. State Verification & Marking (REFUND_PENDING):
+
+সিস্টেম চেক করবে যে অর্ডারটি ফুলফিল করার মতো স্টক আছে কি না। যদি স্টক না থাকে, তবে ডাটাবেজে সাথে সাথে স্ট্যাটাস REFUND_PENDING বা সমতুল্য স্টেটে নিয়ে যাব। (কখনোই গেটওয়ে থেকে টাকা ফেরত পাওয়ার আগে ডাটাবেজে REFUNDED লেখা যাবে না)।
+
+৩. Asynchronous & Idempotent Refund Job:
+
+ব্যাকগ্রাউন্ডে একটি রিট্রাই-সেফ (Retry-safe) জব বা ওয়ার্কার পেমেন্ট গেটওয়ের Refund API কল করবে। নেটওয়ার্ক ফেইলিওর বা রিট্রাইয়ের কারণে যেন একই টাকা বারবার রিফান্ড না হয়ে যায়, সেজন্য রিফান্ড এপিআইতে বাধ্যতামূলকভাবে Idempotency Key ব্যবহার করব।
+
+৪. Verification & Final State (REFUNDED):
+
+গেটওয়ে থেকে অফিশিয়াল সাকসেস রেসপন্স বা রিফান্ড ওয়েব হুক আসার পরই কেবল ডাটাবেজে স্ট্যাটাস পার্মানেন্টলি REFUNDED আপডেট করব। কোনো কারণে ফেইল করলে রিট্রাই, রিকনসিলিয়েশন বা ম্যানুয়াল রিভিউয়ের জন্য ফ্লাগ করব।"
+
+#### Q7. How do you secure webhooks against forgery and replay attacks?
+সমস্যা: Attacker fake payment success webhook পাঠিয়ে বিনা মূল্যে order পেতে পারে, অথবা একটি valid webhook বারবার পাঠাতে পারে।
+
+Interview answer:
+"ওয়েব হুকের সিকিউরিটি হ্যান্ডেল করার সময় আমার মূল নীতি হলো: 'সিগনেচার সঠিক হওয়া মানেই অন্ধের মতো অর্ডার Confirm করা যাবে না, পেমেন্ট ও অর্ডারের আসল তথ্যও যাচাই করতে হবে।'
+
+এটি নিশ্চিত করতে আমি ৪টি ধাপ অনুসরণ করব:
+
+১. Authenticity (আসল মেসেজ কি না যাচাই):
+
+গেটওয়ের সিক্রেট কি (Secret Key) ও ক্রিপ্টোগ্রাফিক সিগনেচার দিয়ে ভেরিফাই করব যে রিকোয়েস্টটি সত্যি পেমেন্ট গেটওয়ে থেকেই এসেছে, কোনো হ্যাকার পাঠায়নি।
+
+২. Replay Protection (একই মেসেজ বারবার আসা আটকানো):
+
+হ্যাকাররা যেন পুরনো পেমেন্ট মেসেজ বারবার পাঠিয়ে ফ্রিতে জিনিস কিনতে না পারে, সেজন্য প্রতিটা ওয়েব হুকের ইউনিক event_id ডাটাবেজে চেক করে Replay Attack আটকাব।
+
+৩. Context Verification (টাকার পরিমাণ ও অর্ডারের তথ্য মিলানো):
+
+সিগনেচার ঠিক থাকলেও ব্যাকএন্ডে গিয়ে চেক করব—ইউজার যত টাকা পে করার কথা ছিল (যেমন: ১,০০০ টাকা), গেটওয়েতে সত্যিই ১,০০০ টাকাই জমা হয়েছে কি না। এছাড়া অর্ডারের বর্তমান স্ট্যাটাস PENDING থেকে PAID হওয়ার উপযুক্ত কি না তা নিশ্চিত হব।
+
+৪. Fast Response (দ্রুত রেসপন্স দেওয়া):
+
+ওয়েব হুক আসার সাথে সাথে মেসেজটি রিসিভ করে গেটওয়েকে দ্রুত 200 OK পাঠাব, যাতে গেটওয়ে টাইমআউট না হয়। এরপর আসল প্রসেসিং ব্যাকগ্রাউন্ড কিউতে (Background Queue) সম্পন্ন করব।
+
+মূল কথা: Signature valid হওয়া মানেই order paid করার অনুমতি নয়। Payment status এবং order context-ও যাচাই করতে হবে।
+
+
+#### Q8. How do you implement idempotency in checkout requests?
+সমস্যা: Customer Pay Now button চারবার চাপলে বা network retry হলে duplicate order বা payment তৈরি হতে পারে।
+
+Interview answer:
+“আমি প্রতিটি logical checkout-এর জন্য client-generated UUID-ভিত্তিক idempotency key ব্যবহার করব। একই checkout-এর সব retry-তে একই key থাকবে। Database unique constraint দিয়ে duplicate order creation আটকাব।”
+```api
+POST /api/checkout
+Idempotency-Key: 8b72-unique-uuid
+```
+
+```sql
+CREATE UNIQUE INDEX uq_order_idempotency
+ON orders (user_id, idempotency_key);
+```
+
+Flow:
+- 1. Authenticated user ও request validate।
+- 2. (user_id, idempotency_key) আগে ব্যবহৃত হয়েছে কি না পরীক্ষা।
+- 3. নতুন key হলে order এবং idempotency record persist।
+- 4. একই key-এর concurrent request এলে unique constraint ও conflict-handling দিয়ে একটি logical order নিশ্চিত।
+- 5. আগের request completed হলে saved result ফেরত।
+- 6. আগের request এখনও processing-এ থাকলে current status ফেরত বা polling নির্দেশনা।
+
+একই key দিয়ে ভিন্ন cart বা amount পাঠালে payload hash mismatch হিসেবে reject করব।
+
+গুরুত্বপূর্ণ: Order idempotency এবং payment idempotency আলাদা। Gateway payment initiation ও refund-এর ক্ষেত্রেও উপযুক্ত idempotency mechanism প্রয়োজন।
+
+#### Q9. How do you ensure consistency across microservices during partial failures?
+সমস্যা: Payment Service টাকা কেটে নিয়েছে, কিন্তু Inventory Service crash করায় stock allocation সম্পন্ন হয়নি।
+
+Interview answer:
+"মাইক্রোসার্ভিস আর্কিটেকচারে যেহেতু প্রতিটি সার্ভিসের আলাদা ডাটাবেজ থাকে, তাই মোনোলিথের মতো গ্লোবাল ACID ট্রানজেকশন বা Two-Phase Commit ব্যবহার করা যায় না—এগুলো স্কেলেবল নয়। পেমেন্ট কেটে নেওয়া কিন্তু ইনভেনটরি আপডেট ফেইল করার মতো Partial Failure হ্যান্ডেল করার জন্য আমি Saga Pattern এবং কিছু রিলায়াবিলিটি প্যাটার্ন ব্যবহার করব:
+
+১. Saga Pattern (Orchestration-based):
+
+পুরো কাজটিকে একটি ট্রানজেকশনে না রেখে কয়েকটি লোকাল ট্রানজেকশনের সিকোয়েন্স হিসেবে চালাব। মাঝখানে একটি Saga Orchestrator থাকবে, যা ধাপে ধাপে সার্ভিসগুলোর কাজ (যেমন: Order -> Inventory -> Payment) পরিচালনা করবে।
+
+২. Compensating Transactions (Business-Level Rollback):
+
+মাইক্রোসার্ভিসে সরাসরি ডাটাবেজ রোলব্যাক সম্ভব নয়। তাই কোনো ধাপ ফেইল করলে আগের সফল কাজটির বিপরীতে একটি রিভার্স বা Compensating Action চালাতে হবে। যেমন: পেমেন্ট সফল হওয়ার পর ইনভেনটরি আপডেট ফেইল করলে, সিস্টেম স্বয়ংক্রিয়ভাবে পেমেন্ট সার্ভিসের Refund API কল করে টাকা ফেরত পাঠাবে। (এখানে মনে রাখতে হবে, এটি ডাটাবেজের রোলব্যাক নয়, বরং একটি পৃথক বিজনেস অপারেশন)।
+
+৩. Transactional Outbox Pattern:
+
+ডাটাবেজে লোকাল স্টেট সেভ হওয়া এবং মেসেজ কিউতে (Kafka/RabbitMQ) ইভেন্ট পাবলিশ হওয়াকে একই ট্রানজেকশনে রাখা হয়, যাতে নেটওয়ার্ক ক্র্যাশ করলেও কোনো ইভেন্ট মিস না হয়।
+
+৪. Idempotent Consumer:
+
+নেটওয়ার্ক রিট্রাইয়ের কারণে যদি একই ইভেন্ট ডাবল চলে আসে, তবে ইউনিক ইভেন্ট আইডি বা Idempotency Key দিয়ে ডাবল পেমেন্ট বা ডাবল প্রসেসিং আটকাব।
+
+৫. Periodic Reconciliation:
+
+রিয়েল-ওয়ার্ল্ডে আননোন এরর বা নেটওয়ার্ক ড্রপ হ্যান্ডেল করার জন্য ব্যাকগ্রাউন্ডে রিকনসিলিয়েশন জব বা ক্রন ওয়ার্কার থাকবে, যা অসম্পূর্ণ ট্রানজেকশন স্ক্যান করে রিকভার করবে।"
+#### Q11. How do you manage price fluctuations during checkout?
+সমস্যা: Cart-এ product-এর দাম ৳২০০, কিন্তু checkout-এর আগে seller দাম ৳২৫০ করেছেন।
+
+Interview answer:
+“আমি client-provided price বিশ্বাস করব না। Checkout-এর সময় server current price, discount, tax ও currency যাচাই করে একটি price snapshot তৈরি করবে। ব্যবসায়িক নিয়ম অনুযায়ী price guarantee থাকলে snapshot-এর মেয়াদ enforce করব।”
+
+####  🔴 Problem (সমস্যা):
+একজন ইউজার লগইন না করে ব্রাউজ করার সময় কার্টে কিছু প্রোডাক্ট যোগ করলেন (Guest Cart)। এরপর তিনি লগইন করলেন। এখন তার আগের সেভড কার্ট এবং এই গেস্ট কার্টের ডেটা কীভাবে মার্জ হবে? এবং নেটওয়ার্ক রিট্রাইয়ের কারণে মার্জ রিকোয়েস্ট বারবার আসলে কোয়ান্টিটি যেন ডাবল হয়ে না যায়, সেটি কীভাবে নিশ্চিত করা যাবে?
+
+🟢 Interview Answer (সমাধান):
+"গেস্ট কার্ট ট্র্যাক করার জন্য একটি সিকিউর guest_token ব্যবহার করব। ইউজার সফলভাবে লগইন করার পর ব্যাকএন্ড একটি একক Transactional & Idempotent প্রক্রিয়ায় গেস্ট কার্ট এবং ইউজারের সেভড কার্ট মার্জ করবে।
+
+Quantity Merging: একই প্রডাক্ট ভেরিয়েন্ট উভয় কার্টে থাকলে তাদের কোয়ান্টিটি যোগ (quantity + quantity) করে দেব।
+
+Unique Constraints: আলাদা ভেরিয়েন্ট হলে আলাদা কার্ট লাইন হিসেবে যোগ হবে এবং ডাটাবেজে Unique Constraint দিয়ে ডুপ্লিকেট কার্ট লাইন আটকাব।
+
+Idempotency: মার্জ প্রসেসটিকে আইডempotেন্ট রাখব, যাতে রিট্রাইয়ের কারণে কোয়ান্টিটি বারবার বেড়ে না যায়।
+
+Cleanup: মার্জ সফল হওয়ার পর গেস্ট কার্টটিকেConsumed বা ডিলিট হিসেবে মার্ক করব এবং চেকআউটের সময় যথারীতি স্টক ও প্রাইস পুনরায় ভ্যালিডেট করব।"
