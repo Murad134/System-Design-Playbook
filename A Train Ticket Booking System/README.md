@@ -679,6 +679,16 @@ flowchart TD
 
 ধরো, তুমি ৪টি seat book করতে চাও। Backend আগে seat-গুলো ১০ মিনিটের জন্য hold করবে। তারপর তুমি payment করবে। Payment সফল হলে booking confirm হবে। Payment না করলে hold expire হয়ে seat আবার available হবে।
 
+1. Pending Booking & Seat Hold: Backend সিট খালি আছে কি না যাচাই করে ১০ মিনিটের জন্য সাময়িকভাবে Hold করে এবং PENDING_PAYMENT বুকিং তৈরি করে।
+
+2. Payment Initiation: Payment Service একটি payment record তৈরি করে এবং Passenger-কে payment gateway-এ টাকা দেওয়ার সুযোগ দেয়।
+
+3. Payment Verification: Payment gateway-এর webhook বা status check-এর মাধ্যমে Backend যাচাই করে সত্যিই পেমেন্ট সফল হয়েছে কি না।
+
+4. Booking Confirmation: Backend পুনরায় যাচাই করে সিটের Hold এখনো কার্যকর কি না। সব ঠিক থাকলে Database Transaction-এর মাধ্যমে Booking CONFIRMED এবং Seat BOOKED করে।
+
+5. Ticket & Notification: Booking নিশ্চিত হওয়ার পর Asynchronous Worker টিকিট তৈরি করে এবং Passenger-কে SMS/Email পাঠায়
+
 ### Train Ticket Booking System — Important SQL for Interview
 
 এই query-গুলো PostgreSQL ধরে লেখা হয়েছে। Booking confirmation, expiry,
