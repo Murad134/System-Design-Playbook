@@ -131,96 +131,65 @@ flowchart TD
 করবে। Fare, seat availability, payment success বা booking confirmation-এর
 final decision frontend নেবে না; এগুলো backend থেকে আসবে।
 
-### 3.2 Backend Architecture
-
-``` mermaid
-flowchart TD
-    API[Express REST API Gateway]
-    AUTH[Auth Middleware]
-    VALIDATE[Input & DTO Validation]
-    
-    subgraph SERVICES[Core Business Services]
-        BOOKING[Booking Service]
-        PAYMENT[Payment Service]
-        WEBHOOK[Idempotent Webhook Handler]
-        WORKER[Expiry & Recovery Worker]
-        TICKET[Ticket Service]
-    end
-
-    DB[(PostgreSQL Main Database)]
-    REDIS[(Redis Cache / Lock)]
-    GATEWAY[External Payment Gateway]
-
-    API --> AUTH
-    AUTH --> VALIDATE
-    VALIDATE --> BOOKING
-    VALIDATE --> PAYMENT
-
-    BOOKING <-->|Distributed Lock / Cache| REDIS
-    BOOKING <-->|ACID Transactions| DB
-    
-    PAYMENT -->|Initiate Txn| GATEWAY
-    GATEWAY -->|Callback / Webhook| WEBHOOK
-    WEBHOOK -->|Verify Signature & Idempotency| PAYMENT
-    PAYMENT -->|Update Order & Issue Ticket| DB
-    PAYMENT --> TICKET
-    
-    WORKER <-->|Query & Expire Held Seats| DB
-```
-
-**Interview explanation:** Backend হলো system-এর main authority। Booking
-তৈরির সময় transaction-এর মধ্যে seat lock করে চারটি seat একসঙ্গে hold করবে।
-Payment gateway-এর সঙ্গে কথা বলার সময় database transaction open রাখবে না।
-Expiry worker আলাদাভাবে expired booking দেখে seat release করবে।
 
 ### 3.3 Full System Architecture
 
 ``` mermaid
-flowchart TD
-    subgraph CLIENT_LAYER[Frontend Client Layer]
-        USER[Passenger]
-        CLIENT[React / Next.js Web App]
-        USER --> CLIENT
+
+flowchart TB
+
+    subgraph S1["① Frontend Layer"]
+        U["👤 Passenger"] --> W["React / Next.js Web App"]
     end
 
-    subgraph API_LAYER[API Gateway & Security]
-        GATEWAY_API[Express REST API Gateway]
-        AUTH_VAL[Auth & Request Validation]
-        GATEWAY_API --> AUTH_VAL
+    subgraph S2["② Backend Layer"]
+        direction LR
+        G["Express API / Auth"]
+        B["Booking Service"]
+        P["Payment Service"]
+        C["Booking Confirmation"]
+        T["Ticket Service"]
+        N["Notification Service"]
+
+        G --> B
+        G --> P
+        B --> C
+        P --> C
+        C --> T
+        T --> N
     end
 
-    subgraph CORE_LAYER[Backend Application Services]
-        BOOKING_SVC[Booking Service]
-        PAYMENT_SVC[Payment Service]
-        WEBHOOK_SVC[Idempotency Webhook Handler]
-        WORKER_SVC[Expiry Cron / Queue Worker]
-        NOTIF_SVC[Notification & Ticket Service]
+    subgraph S3["③ Database Layer"]
+        direction LR
+        DB[("PostgreSQL")]
+        TD[("Ticket Records")]
     end
 
-    subgraph DATA_LAYER[Data & State Storage]
-        DB[(PostgreSQL Primary DB)]
-        REDIS[(Redis Cache / Rate Limiting)]
+    subgraph S4["④ External Services"]
+        direction LR
+        PG["Payment Gateway"]
+        MSG["SMS / Email Gateway"]
     end
 
-    EXT_GATEWAY[External Payment Gateway]
-    EXT_SMS[SMS / Email Gateway]
+    W -->|"HTTPS + JWT"| G
 
-    CLIENT <-->|HTTPS / TLS 1.3| GATEWAY_API
-    AUTH_VAL --> BOOKING_SVC
-    AUTH_VAL --> PAYMENT_SVC
+    B <-->|"Seat Lock + Booking"| DB
+    C <-->|"Confirm Booking"| DB
+    T -->|"Save Ticket"| TD
 
-    BOOKING_SVC <-->|Concurrency Control| REDIS
-    BOOKING_SVC <-->|ACID Row Locking| DB
-    
-    PAYMENT_SVC -->|Initiate Checkout| EXT_GATEWAY
-    EXT_GATEWAY -->|Verified Webhook| WEBHOOK_SVC
-    WEBHOOK_SVC --> PAYMENT_SVC
-    
-    PAYMENT_SVC --> NOTIF_SVC
-    NOTIF_SVC -->|Send Ticket PDF / SMS| EXT_SMS
+    P <-->|"Payment + Webhook"| PG
+    N -->|"Send E-ticket / Notification"| MSG
+    MSG --> U
 
-    WORKER_SVC <-->|Background Cleanup| DB
-    WORKER_SVC <-->|Sync State| REDIS
+    classDef user fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    classDef svc fill:#E6F1FB,stroke:#185FA5,color:#042C53
+    classDef db fill:#EEEDFE,stroke:#534AB7,color:#26215C
+    classDef ext fill:#FAEEDA,stroke:#854F0B,color:#412402
+
+    class U user
+    class W,G,B,P,C,T,N svc
+    class DB,TD db
+    class PG,MSG ext
 ```
 #### Quick Reference Table (Concepts & Their Purpose)
 ##### Arrow flow
@@ -419,31 +388,41 @@ Workflow:
 
 ### 7. External Payment Gateway → Idempotent Webhook Handler
 
-Payment Gateway payment-related event বা callback পাঠালে Backend-এর Webhook Handler সেটি গ্রহণ করবে।
+Webhook কীভাবে কাজ করে?
 
-**API endpoint:**
+1 Payment Gateway → Backend
 
-`POST /api/webhooks/payment`
+তুমি টাকা দেওয়ার পর bKash তোমার Backend-এর POST /api/webhooks/payment endpoint-এ একটি message পাঠায়: “এই payment সফল হয়েছে।”
 
-Webhook processing workflow:
+2Message আসল কি না যাচাই
 
-1. Gateway-এর documentation অনুযায়ী callback signature বা authenticity যাচাই করা হবে, যেখানে প্রযোজ্য।
-2. Event ID এবং প্রয়োজনীয় callback metadata durable Webhook Inbox বা event table-এ সংরক্ষণ করা হবে।
-3. Database-এ `UNIQUE (provider, event_id)` constraint ব্যবহার করে duplicate event শনাক্ত করা হবে।
-4. Event durableভাবে সংরক্ষিত হলে Gateway-কে উপযুক্ত HTTP acknowledgement, যেমন `200 OK`, দেওয়া হবে।
-5. Asynchronous worker event process করে Gateway-এর server-side API দিয়ে payment status যাচাই করবে।
-6. Verified event Payment Service-এ পাঠানো হবে।
+Backend পরীক্ষা করে message-টি সত্যিই Gateway থেকে এসেছে কি না এবং এতে কোনো পরিবর্তন করা হয়েছে কি না। Gateway-এর নিয়ম অনুযায়ী signature verification বা অন্য authentication পদ্ধতি ব্যবহার করা হয়।
 
-যদি event সংরক্ষণ ব্যর্থ হয়, Gateway-এর documented retry policy অনুযায়ী acknowledgement না দিয়ে retry করার সুযোগ রাখতে হবে।
+3 Event Database-এ Save
 
-একই Payment Success Event তিনবার এলেও সিস্টেম এমনভাবে তৈরি করতে হবে, যেন payment একবারই সফল হিসেবে রেকর্ড হয় এবং একই booking-এর জন্য একাধিক ticket তৈরি না হয়।
+Backend message-টি Database-এ সংরক্ষণ করে। একই message আগে এসেছে কি না, সেটিও পরীক্ষা করে। Event ID-তে UNIQUE constraint থাকায় একই event দ্বিতীয়বার নতুন event হিসেবে save করা যায় না।
 
-এখানে দুটি আলাদা বিষয় গুরুত্বপূর্ণ:
+4 Gateway-কে Acknowledgement
 
-- **Webhook Idempotency:** একই event বারবার process না করা।
-- **Payment Idempotency:** একই gateway transaction একাধিকবার সফল payment হিসেবে রেকর্ড না করা।
+Message নিরাপদে save হলে Backend 200 OK পাঠায়। অর্থাৎ, “তোমার message পেয়েছি।” এর মানে এই নয় যে payment ইতিমধ্যে যাচাই হয়ে গেছে।
 
-শুধু event ID unique করলেই payment verification সম্পন্ন হয় না; payment reference ও transaction-level uniqueness-ও প্রয়োজন।
+5 Worker Payment Verify করে
+
+Background Worker Gateway-এর server-side API-তে যাচাই করে payment সত্যিই সফল হয়েছে কি না, টাকার পরিমাণ ৳৫০০ কি না এবং transaction reference সঠিক কি না। সব ঠিক থাকলে Payment Service payment-টিকে SUCCEEDED করে।
+
+একই message তিনবার এলে কী হবে?
+ধরো, Gateway একই payment success message ভুলবশত তিনবার পাঠাল।
+Event	Backend কী করবে?
+প্রথমবার	Event save করে process করবে
+দ্বিতীয়বার	একই Event ID শনাক্ত করে duplicate হিসেবে ধরবে
+তৃতীয়বার	আবার payment process করবে না
+এতে একই payment একাধিকবার রেকর্ড হওয়া বা একই booking-এর জন্য বারবার ticket তৈরির ঝুঁকি কমে।
+
+দুটি বিষয় মনে রাখবে:
+- Webhook Idempotency: একই message বারবার এলেও সেটি নতুন করে process না করা।
+- Payment Idempotency: একই gateway transaction যেন একাধিকবার সফল payment হিসেবে রেকর্ড না হয়।
+
+শুধু Event ID unique করলেই যথেষ্ট নয়। একই transaction ভিন্ন event ID-তে এলেও যেন দ্বিতীয়বার payment record না হয়, তাই gateway transaction reference-এও uniqueness নিশ্চিত করতে হয়। Ticket তৈরির ক্ষেত্রেও booking ID বা ticket key দিয়ে duplicate creation আটকাতে হয়
 
 ### 8. Webhook Handler → Payment Service (Payment Verification)
 
@@ -495,6 +474,27 @@ Booking Service confirmation-এর আগে যাচাই করবে:
 সিট এখনো অন্য কাউকে বরাদ্দ করা না হয়ে থাকলেও expired booking স্বয়ংক্রিয়ভাবে confirm করা হবে কি না, তা স্পষ্ট business policy-এর ওপর নির্ভর করবে। সবচেয়ে সহজ ও নিরাপদ policy হলো expired hold পুনরায় ব্যবহার না করে নতুন reservation flow শুরু করা।
 
 Payment Service ও Booking Service আলাদা database ব্যবহার করলে payment success এবং booking confirmation একটি সাধারণ ACID transaction-এ হবে না। এই distributed workflow নির্ভরযোগ্য করতে durable event delivery, retry, idempotency এবং reconciliation job প্রয়োজন।
+
+#### Mutex (পূর্ণরূপ: Mutual Exclusion):
+হলো কনকারেন্সি প্রোগ্রামিং (Concurrent Programming)-এর একটি অত্যন্ত গুরুত্বপূর্ণ কনসেপ্ট বা মেকানিজম।
+
+সহজ কথায়, এটি হলো একটি ডিজিটাল লক (Digital Lock)।
+
+যখন একাধিক থ্রেড (Threads) বা প্রসেস (Processes) একই সময়ে একই শেয়ারড রিসোর্স (Shared Resource)—যেমন: কোনো মেমোরি লোকেশন, ভ্যারিয়েবল, ফাইল বা ডাটাবেজ টেবিল—অ্যাক্সেস বা মডিফাই করার চেষ্টা করে, তখন ডেটা কনফ্লিক্ট বা রেস কন্ডিশন (Race Condition) এড়ানোর জন্য Mutex ব্যবহার করা হয়।
+
+ট্রেনের টিকিট বুকিং সিস্টেমে Mutex ঠিক কীভাবে কাজ করে এবং কেন এটি এতটা জরুরি, তা একটি বাস্তব উদাহরণ দিয়ে নিচে বুঝিয়ে দেওয়া হলো:
+
+১. সমস্যাটি কোথায় হয়? (Race Condition)ধরা যাক, ঢাকা থেকে জেসোরগামী একটি ট্রেনের A1 নম্বর সিটটি শুধু একটিই খালি আছে। ঠিক একই সেকেন্ডে (একই মিলিিসেকেন্ডে) দু'জন যাত্রী—রহিম এবং করিম—ওই সিটটি বুক করার জন্য রিকোয়েস্ট পাঠাল।
+
+যদি সিস্টেমে কোনো লক বা Mutex না থাকে, তবে ব্যাকএন্ড সার্ভার একই সময়ে দু'টি কাজ করবে:রহিম দেখবে সিট খালি আছে  সিট বুক করে ফেলবে।করিমও দেখবে সিট খালি আছে  সেও সিট বুক করে ফেলবে।ফলাফল? একই সিট দু'জন যাত্রীর নামে কনফার্ম হয়ে যাবে (Double Booking), যা কোনো রেলওয়ে সিস্টেমেই গ্রহণযোগ্য নয়।
+
+২. এখানে Mutex যেভাবে কাজ করেএই সমস্যা সমাধানের জন্য সার্ভারে যখন রিকোয়েস্টগুলো আসে, তখন একটি Mutex (লক) ব্যবহার করা হয়:
+
+Lock Acquire: রহিম ও করিমের রিকোয়েস্ট আসার পর সিস্টেম প্রথমে Mutex-এ একটি লক নেওয়ার চেষ্টা করে। ধরুন, রহিম-এর রিকোয়েস্ট মিলিিসেকেন্ডের ভগ্নাংশে আগে পৌঁছাল এবং সে Mutex-টি লক করে ফেলল।
+
+Critical Section (বাস্তবায়ন): এখন রহিম সার্ভারে চেক করল যে সিট A1 ফাঁকা আছে কি না। ফাঁকা থাকায় সেটিকে সে নিজের নামে হোল্ড বা বুক করে ফেলল।Wait / Block: ঠিক ওই মুহূর্তেই করিম যখন সিট চেক করতে চাইল, সিস্টেম দেখল Mutex ইতিমধ্যে রহিমের দখলে আছে (লক করা)। তাই করিমের রিকোয়েস্টটিকে ওয়েটিং স্টেটে (Blocked) রাখা হলো।
+
+Unlock & Result: রহিমের বুকিং প্রসেস শেষ হওয়ার পর Mutex রিলিজ (Unlock) হলো। এবার করিমের রিকোয়েস্ট সুযোগ পেল। করিম সিট চেক করে দেখল যে A1 সিটটি ইতিমধ্যে BOOKED হয়ে গেছে। ফলে সিস্টেম করিমকে জানিয়ে দিল যে "দুঃখিত, এই সিটটি আর খালি নেই।
 
 ### 10. Booking Service → PostgreSQL Primary Database (Atomic Confirmation)
 
@@ -722,6 +722,7 @@ VALUES (1, 101, 'PENDING_PAYMENT', 800.00,
                 NOW() + INTERVAL '10 minutes')
 RETURNING id, status, expires_at;
 ```
+এই কুয়েরিটি নির্দিষ্ট ইউজার ও ট্রিপের জন্য ৮০০ টাকা মূল্যের একটি নতুন বুকিং তৈরি করে ১০ মিনিটের জন্য PENDING_PAYMENT স্ট্যাটাসে ডাটাবেজে সেভ করে এবং তৈরি হওয়া বুকিংয়ের id, status ও expires_at রিটার্ন করে।
 
 #### 3. Hold Seats — Payment-এর আগে seat সাময়িকভাবে reserve করা
 
