@@ -131,6 +131,235 @@ flowchart TB
     RTC --- STUN[STUN]
     RTC --- TURN[TURN Relay]
 ```
+### End-to-End Architecture Diagram
+```mermaid
+flowchart TB
+
+    subgraph S1["① Client Request & Authentication"]
+        direction LR
+        A["Sender Mobile / Web Client"] -->|"HTTPS Request"| LB["Load Balancer / API Gateway"]
+        LB --> AUTH["Authentication & Authorization"]
+        AUTH -->|"Authorized Request"| MSG["Messaging Service"]
+    end
+
+    subgraph S2["② Message Persistence"]
+        direction LR
+        MSG -->|"BEGIN TRANSACTION"| PG[("PostgreSQL")]
+        PG --> SAVE["Save Message & Initial Status"]
+        SAVE --> OUTBOX["Transactional Outbox"]
+        OUTBOX -->|"COMMIT"| PG
+    end
+
+    subgraph S3["③ Asynchronous Message Delivery"]
+        direction LR
+        OUTBOX --> RELAY["Outbox Relay"]
+        RELAY --> MQ["Kafka / RabbitMQ"]
+        MQ --> DW["Delivery Workers"]
+        DW -->|"Find recipient connection"| REDIS[("Redis: Presence & Connection State")]
+        DW -->|"Recipient online"| WS["WebSocket Gateway"]
+        WS --> B["Recipient Mobile / Web Client"]
+        DW -->|"Recipient offline"| PENDING["Keep Message Pending"]
+        PENDING --> PG
+    end
+
+    subgraph S4["④ Delivery & Read Receipts"]
+        direction LR
+        B -->|"Message received ACK"| WS
+        WS -->|"Update delivered status"| MSG2["Messaging Service"]
+        MSG2 --> PG2[("PostgreSQL")]
+        B -->|"Message read ACK"| WS
+        WS -->|"Update read status"| MSG2
+        MSG2 -->|"Receipt event"| MQ2["Message Event Queue"]
+        MQ2 --> DW2["Receipt Delivery Worker"]
+        DW2 -->|"Notify sender"| WS2["Sender WebSocket"]
+        WS2 --> A
+    end
+
+    subgraph S5["⑤ Presence & Connection Management"]
+        direction LR
+        A <-->|"Connect / Disconnect"| WS
+        B <-->|"Connect / Disconnect"| WS
+        WS --> PRES["Presence Service"]
+        PRES <--> REDIS
+        PRES -->|"Online / Offline status"| WS
+    end
+
+    subgraph S6["⑥ Audio / Video Call Signaling"]
+        direction LR
+        A -->|"Start call"| LB2["API Gateway"]
+        LB2 --> CALL["Call Signaling Service"]
+        CALL --> CALLDB[("Call Metadata")]
+        CALL <--> WS
+        WS -->|"Incoming call signal"| B
+        A <-->|"Offer / Answer / ICE candidates"| WS
+        B <-->|"Offer / Answer / ICE candidates"| WS
+    end
+
+    subgraph S7["⑦ Real-Time Audio / Video Media"]
+        direction LR
+        A <-->|"WebRTC Media"| RTC["WebRTC Connection"]
+        RTC --- STUN["STUN Server"]
+        RTC --- TURN["TURN Relay"]
+        RTC <-->|"Audio / Video Streams"| B
+    end
+
+    classDef client fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    classDef service fill:#E6F1FB,stroke:#185FA5,color:#042C53
+    classDef storage fill:#EEEDFE,stroke:#534AB7,color:#26215C
+    classDef external fill:#FAEEDA,stroke:#854F0B,color:#412402
+
+    class A,B client
+    class LB,AUTH,MSG,SAVE,RELAY,DW,WS,MSG2,DW2,WS2,PRES,CALL service
+    class PG,OUTBOX,MQ,REDIS,PG2,MQ2,CALLDB storage
+    class RTC,STUN,TURN external
+```
+
+## **4.2 End-to-End Architecture Description**
+
+### **ধাপ ১: Client Request ও Authentication**
+
+এই ধাপে Sender অন্য User-কে message পাঠানোর request করবে এবং Backend Sender-এর identity যাচাই করবে।
+
+1. Sender Mobile / Web Client থেকে message পাঠাবেন।
+2. Request Load Balancer / API Gateway-তে পৌঁছাবে।
+3. API Gateway request-টি Authentication and Authorization Module-এ পাঠাবে।
+4. Authentication Module token যাচাই করে Sender-এর identity নিশ্চিত করবে।
+5. Authorization Module যাচাই করবে Sender সংশ্লিষ্ট conversation-এ message পাঠানোর অনুমতি রাখেন কি না।
+6. Request valid হলে Messaging Service-এ পাঠানো হবে। Invalid বা unauthorized request প্রত্যাখ্যান করা হবে।
+
+**এই ধাপের উদ্দেশ্য:** নিরাপদভাবে message request গ্রহণ করা এবং unauthorized access প্রতিরোধ করা।
+
+### **ধাপ ২: Message Persistence ও Database Transaction**
+
+এই ধাপে Message এবং তার delivery event database-এ নির্ভরযোগ্যভাবে সংরক্ষণ করা হবে।
+
+1. Messaging Service message-এর sender ID, recipient ID, conversation ID, content এবং timestamp প্রস্তুত করবে।
+2. PostgreSQL-এ একটি database transaction শুরু হবে।
+3. Transaction-এর মধ্যে message record সংরক্ষণ করা হবে।
+4. একই transaction-এ Transactional Outbox-এ message delivery event সংরক্ষণ করা হবে।
+5. Transaction সফল হলে PostgreSQL-এ পরিবর্তনগুলো commit হবে।
+6. Transaction ব্যর্থ হলে message ও outbox event—দুটিই rollback হবে।
+7. Message সংরক্ষণ সফল হলে Sender-কে `SENT` status জানানো হবে।
+
+**এই ধাপের উদ্দেশ্য:** Message database-এ সংরক্ষিত হওয়ার পর delivery event হারিয়ে যাওয়ার ঝুঁকি কমানো।
+
+### **ধাপ ৩: Outbox Relay ও Message Queue**
+
+এই ধাপে সংরক্ষিত message delivery event asynchronous processing-এর জন্য queue-তে পাঠানো হবে।
+
+1. Outbox Relay PostgreSQL-এর Transactional Outbox থেকে unpublished event সংগ্রহ করবে।
+2. Relay event-টি Kafka / RabbitMQ Message Queue-তে publish করবে।
+3. Event সফলভাবে publish হয়েছে বলে নিশ্চিত হওয়ার পর Outbox event-কে processed বা published হিসেবে চিহ্নিত করা হবে।
+4. Delivery Worker queue থেকে event গ্রহণ করবে।
+5. Worker Redis-এর মাধ্যমে Recipient-এর connection এবং presence state যাচাই করবে।
+6. একই event একাধিকবার process হলেও duplicate delivery বা duplicate state transition এড়াতে idempotency ব্যবহার করা হবে।
+
+**এই ধাপের উদ্দেশ্য:** Message persistence এবং asynchronous delivery-এর মধ্যে নির্ভরযোগ্য সংযোগ তৈরি করা।
+
+### **ধাপ ৪: Recipient-এর কাছে Message Delivery**
+
+এই ধাপে Recipient online থাকলে WebSocket-এর মাধ্যমে message পাঠানো হবে; offline থাকলে পরে delivery-এর ব্যবস্থা করা হবে।
+
+1. Delivery Worker Redis থেকে Recipient-এর active connection-এর তথ্য সংগ্রহ করবে।
+2. Recipient online থাকলে Worker WebSocket Gateway-এর মাধ্যমে message পাঠাবে।
+3. WebSocket Gateway message-টি Recipient-এর Mobile / Web Client-এ পৌঁছে দেবে।
+4. Recipient-এর client message গ্রহণ করলে delivery acknowledgment পাঠাবে।
+5. Messaging Service acknowledgment যাচাই করে PostgreSQL-এ message status `DELIVERED` হিসেবে update করবে।
+6. Recipient offline থাকলে message database-এ সংরক্ষিত থাকবে এবং pending delivery হিসেবে বিবেচিত হবে।
+7. Recipient পুনরায় online হলে Client pending message fetch করতে পারবে অথবা Delivery Worker পুনরায় delivery attempt করবে।
+
+**এই ধাপের উদ্দেশ্য:** Online Recipient-এর কাছে দ্রুত message পৌঁছানো এবং offline Recipient-এর জন্য message সংরক্ষিত রাখা।
+
+**গুরুত্বপূর্ণ:** Redis-এর presence state পরিবর্তনশীল হতে পারে। তাই Recipient online দেখালেই message delivery নিশ্চিত হয়েছে বলা যাবে না; Client-এর acknowledgment দিয়ে delivery নিশ্চিত করতে হবে।
+
+### **ধাপ ৫: Message Read Receipt ও Sender Notification**
+
+এই ধাপে Recipient message পড়লে Sender-কে read status জানানো হবে।
+
+1. Recipient message খুলে পড়লে Client একটি read acknowledgment পাঠাবে।
+2. Messaging Service acknowledgment যাচাই করে message-এর read status PostgreSQL-এ update করবে।
+3. প্রয়োজন অনুযায়ী read receipt event তৈরি করে Message Event Queue-তে publish করা হবে।
+4. Delivery Worker বা Receipt Worker event গ্রহণ করবে।
+5. WebSocket Gateway-এর মাধ্যমে Sender-এর active connection-এ read receipt পাঠানো হবে।
+6. Sender-এর Client message-টিকে `READ` status হিসেবে দেখাবে।
+
+**এই ধাপের উদ্দেশ্য:** Sender-কে message-এর delivery এবং reading status জানানো।
+
+**Status-এর পার্থক্য:**
+- `SENT`: Message server/database-এ সফলভাবে সংরক্ষিত হয়েছে।
+- `DELIVERED`: Recipient-এর client message গ্রহণের acknowledgment দিয়েছে।
+- `READ`: Recipient-এর client message পড়ার acknowledgment দিয়েছে।
+
+### **ধাপ ৬: Presence Service ও Connection Management**
+
+এই ধাপে User online নাকি offline এবং তার active connection আছে কি না, তা পরিচালনা করা হবে।
+
+1. User application খুললে WebSocket Gateway-এর সঙ্গে connection স্থাপন করবে।
+2. Presence Service Redis-এ User-এর online status এবং active connection-এর তথ্য সংরক্ষণ করবে।
+3. User disconnect করলে সংশ্লিষ্ট connection-এর state update করা হবে।
+4. User-এর একাধিক device থাকলে একটি device disconnect করলেই User-কে offline ঘোষণা করা যাবে না; অন্য active connection যাচাই করতে হবে।
+5. Heartbeat এবং TTL ব্যবহার করে stale connection শনাক্ত করা যেতে পারে।
+6. Presence information অনুযায়ী Delivery Worker উপযুক্ত WebSocket connection-এ message পাঠানোর চেষ্টা করবে।
+
+**এই ধাপের উদ্দেশ্য:** Online status পরিচালনা করা এবং message delivery-এর জন্য উপযুক্ত active connection খুঁজে পাওয়া।
+
+### **ধাপ ৭: Audio / Video Call Signaling**
+
+এই ধাপে Caller ও Recipient-এর মধ্যে audio/video call শুরু এবং connection setup পরিচালনা করা হবে।
+
+1. Caller Client থেকে Call Signaling Service-এর মাধ্যমে call request পাঠাবে।
+2. Call Signaling Service একটি call ID তৈরি করবে এবং প্রয়োজনীয় call metadata সংরক্ষণ করবে।
+3. Service যাচাই করবে Recipient call গ্রহণ করার উপযুক্ত অবস্থায় আছেন কি না।
+4. WebSocket Gateway-এর মাধ্যমে Recipient-এর Client-এ incoming call notification পাঠানো হবে।
+5. Recipient call accept বা reject করলে সেই সিদ্ধান্ত Caller-কে জানানো হবে।
+6. Call accept হলে Caller ও Recipient-এর মধ্যে WebRTC connection তৈরির জন্য signaling exchange শুরু হবে।
+7. Call শেষ হলে Call Signaling Service call status update করবে।
+
+**এই ধাপের উদ্দেশ্য:** Call initiation, incoming call notification, acceptance, rejection এবং termination পরিচালনা করা।
+
+### **ধাপ ৮: WebRTC Audio / Video Media Transfer**
+
+এই ধাপে Caller ও Recipient-এর মধ্যে real-time audio/video stream আদান-প্রদান হবে।
+
+1. Call Signaling Service-এর মাধ্যমে Caller ও Recipient WebRTC offer, answer এবং ICE candidate exchange করবেন।
+2. WebSocket Gateway signaling message আদান-প্রদানে সহায়তা করবে।
+3. STUN Server NAT traversal-এর জন্য প্রয়োজনীয় network address discovery-তে সহায়তা করবে।
+4. Direct peer-to-peer connection সম্ভব হলে audio/video media সরাসরি Caller ও Recipient-এর মধ্যে আদান-প্রদান হবে।
+5. Direct connection সম্ভব না হলে TURN Relay-এর মাধ্যমে media পাঠানো হবে।
+6. Call শেষ হলে WebRTC media connection বন্ধ হবে এবং Call Signaling Service call status update করবে।
+
+**এই ধাপের উদ্দেশ্য:** Messaging system থেকে আলাদা real-time audio/video media communication পরিচালনা করা।
+
+**গুরুত্বপূর্ণ:** WebSocket মূলত call signaling-এর জন্য ব্যবহৃত হবে; audio/video media সাধারণত WebRTC-এর মাধ্যমে প্রবাহিত হবে। বড় group call-এর জন্য SFU-এর মতো media server প্রয়োজন হতে পারে।
+
+### **ধাপ ৯: Failure Handling ও Reliability**
+
+একটি production-ready messaging system-এ duplicate event, network failure এবং offline delivery নির্ভরযোগ্যভাবে handle করতে হবে।
+
+1. **Duplicate Message Request:** একই logical message retry করলে idempotency key বা client-generated message ID ব্যবহার করে duplicate message তৈরি হওয়া প্রতিরোধ করতে হবে।
+2. **Duplicate Queue Event:** একই event একাধিকবার process হলেও duplicate state transition বা receipt তৈরি হওয়া ঠেকাতে হবে।
+3. **Recipient Offline:** Message PostgreSQL-এ সংরক্ষিত থাকবে এবং Recipient reconnect করলে delivery পুনরায় চেষ্টা করা হবে।
+4. **WebSocket Disconnect:** Client reconnect করার পর missed message এবং প্রয়োজনীয় receipt server থেকে synchronize করতে হবে।
+5. **Outbox Relay Failure:** Published status নিশ্চিত না হলে event পুনরায় publish হতে পারে; তাই consumer-কে idempotent হতে হবে।
+6. **Queue Failure:** Retry এবং প্রয়োজনে Dead-Letter Queue ব্যবহার করে failed event পরিচালনা করতে হবে।
+7. **Call Connection Failure:** WebRTC direct connection ব্যর্থ হলে TURN Relay ব্যবহার করার চেষ্টা করতে হবে।
+8. **Unauthorized Access:** Conversation membership ও permission যাচাই করে অন্য User-এর private message বা call-এ অননুমোদিত access প্রতিরোধ করতে হবে।
+
+**এই ধাপের উদ্দেশ্য:** Network, queue, connection এবং service failure-এর মধ্যেও message persistence, delivery reliability ও user privacy বজায় রাখা।
+
+---
+
+## **End-to-End Flow Summary**
+
+1. **Client Request:** Sender message পাঠাবেন এবং API Gateway authentication ও authorization যাচাই করবে।
+2. **Message Persistence:** Messaging Service PostgreSQL-এ message ও Transactional Outbox event একই transaction-এ সংরক্ষণ করবে।
+3. **Queue Processing:** Outbox Relay event Kafka / RabbitMQ-তে পাঠাবে এবং Delivery Worker event গ্রহণ করবে।
+4. **Message Delivery:** Recipient online থাকলে WebSocket-এর মাধ্যমে message পাঠানো হবে; offline থাকলে পরে delivery করা হবে।
+5. **Delivery & Read Receipts:** Recipient-এর acknowledgment অনুযায়ী `DELIVERED` এবং `READ` status update হবে।
+6. **Presence Management:** Redis ও Presence Service online/offline এবং active connection-এর তথ্য পরিচালনা করবে।
+7. **Call Signaling:** Call Signaling Service এবং WebSocket call setup ও signaling পরিচালনা করবে।
+8. **Audio / Video Communication:** WebRTC, STUN এবং TURN ব্যবহার করে real-time media transfer হবে।
+9. **Failure Recovery:** Idempotency, retries, reconnect synchronization এবং permission checks-এর মাধ্যমে system-এর reliability বজায় রাখা হবে।
 
 ### 3.1 Component responsibilities
 

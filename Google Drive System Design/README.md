@@ -182,122 +182,209 @@ flowchart TD
     FS -. "Cache-aside" .-> REDIS
     SH -. "Permission cache" .-> REDIS
 ```
+### End-to-End Architecture Diagram
+```mermaid
 
-**Architecture-এর গুরুত্বপূর্ণ বিষয়:**
+flowchart TD
 
-- API authentication এবং authorization যাচাই করে।
-- PostgreSQL file metadata, ownership, sharing, version references ও upload state রাখে।
-- Object storage file-এর actual binary content রাখে।
-- বড় file-এর bytes সাধারণত browser থেকে signed URL ব্যবহার করে সরাসরি object storage-এ যায়।
-- Redis কেবল cache; authoritative permission, quota বা file state নয়।
-- Background workers cleanup, abandoned upload এবং storage reconciliation পরিচালনা করে।
-- Database transaction ও object storage operation একসঙ্গে সাধারণ ACID transaction-এর অংশ নয়। তাই recovery ও reconciliation প্রয়োজন।
+    subgraph S1["① User Request & Authentication"]
+        direction LR
+        U["👤 User / Browser / Mobile"] --> LB["Load Balancer / HTTPS"]
+        LB --> FE["React / Next.js Frontend"]
+        FE -->|"API Request + Token"| API["Node.js / Express API"]
+        API --> AUTH["Authentication & Authorization"]
+    end
 
-### **3.3 Step-by-Step Workflow**
+    subgraph S2["② File & Folder Management"]
+        direction LR
+        AUTH --> FS["File & Folder Service"]
+        FS -->|"Create / Read / Rename / Delete"| PG1[("PostgreSQL")]
+        FS -.->|"Cache-aside"| REDIS[("Redis Cache")]
+        FS -->|"Access file content"| OBJ[("Object Storage")]
+    end
 
-#### **Phase 1: File Upload ও Quota Reservation**
+    subgraph S3["③ Upload Session & Quota Validation"]
+        direction LR
+        AUTH --> UP["Upload Session Service"]
+        UP --> QU["Quota Service"]
+        QU -->|"Check user storage limit"| PG2[("PostgreSQL")]
+        QU -->|"Quota available"| SESSION["Create Upload Session"]
+        SESSION -->|"Save session & reserved quota"| PG2
+        SESSION --> GW["Signed URL / Multipart Upload"]
+        GW -->|"Upload file chunks"| OBJ
+    end
 
-1. User frontend থেকে file নির্বাচন করবেন।
-2. Frontend `POST /upload-sessions` request পাঠাবে।
-3. Backend authentication, folder access, file size এবং idempotency key যাচাই করবে।
-4. Database transaction-এর মধ্যে user quota row lock বা atomic conditional update করবে।
-5. Upload-এর সম্ভাব্য size-এর জন্য quota reserve করা হবে।
-6. Upload session `INITIATED` বা `UPLOADING` status-এ তৈরি হবে।
-7. Backend signed upload URL বা multipart upload instructions দেবে।
+    subgraph S4["④ Upload Completion & Metadata Update"]
+        direction LR
+        OBJ -->|"Verify uploaded object"| COMPLETE["Complete Upload"]
+        COMPLETE -->|"Validate size / checksum"| UP2["Upload Session Service"]
+        UP2 -->|"Finalize metadata & quota"| PG3[("PostgreSQL")]
+        UP2 -->|"Publish processing event"| QUEUE[("Job Queue / Outbox")]
+    end
 
-**কেন quota আগে reserve করা হয়?**
+    subgraph S5["⑤ File Sharing & Permission Management"]
+        direction LR
+        AUTH --> SH["Sharing & Permission Service"]
+        SH -->|"Save sharing rules"| PG4[("PostgreSQL")]
+        SH -.->|"Permission cache"| REDIS
+        SH -->|"Generate authorized access"| LINK["Share Link / Access Grant"]
+        LINK --> RECIPIENT["Recipient User"]
+    end
 
-একই user একসঙ্গে একাধিক বড় file upload করলে শুধু upload শেষে quota check করলে storage limit অতিক্রম হতে পারে। তাই concurrent uploads-এর জন্য reservation দরকার।
+    subgraph S6["⑥ File Version Management"]
+        direction LR
+        AUTH --> VS["Version Service"]
+        VS -->|"Save version metadata"| PG5[("PostgreSQL")]
+        VS -->|"Store version content"| OBJ
+    end
 
-#### **Phase 2: Chunked/Resumable Upload**
+    subgraph S7["⑦ Background Processing & Notifications"]
+        direction LR
+        QUEUE --> WORKER["Background Workers"]
+        WORKER -->|"Read / verify / process objects"| OBJ
+        WORKER -->|"Update job & file status"| PG6[("PostgreSQL")]
+        WORKER --> NOTIFY["Notification Service"]
+        NOTIFY -->|"Email / In-app Notification"| U2["👤 User"]
+    end
 
-1. File ছোট ছোট chunks-এ ভাগ করা হবে।
-2. প্রতিটি chunk নির্দিষ্ট upload session ও part number-এর সঙ্গে যুক্ত থাকবে।
-3. Object storage-এ chunks upload হবে।
-4. Chunk upload সফল হলে তার checksum/ETag এবং part information সংরক্ষণ করা হবে।
-5. Network failure হলে client server থেকে uploaded parts-এর status জেনে বাকি chunks upload করবে।
-6. সব chunks upload হলে backend completion request process করবে।
-7. Object storage multipart completion সফল হলে final object checksum/size verify করা হবে।
+    classDef user fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    classDef service fill:#E6F1FB,stroke:#185FA5,color:#042C53
+    classDef storage fill:#EEEDFE,stroke:#534AB7,color:#26215C
+    classDef external fill:#FAEEDA,stroke:#854F0B,color:#412402
 
-**Important:** Client-এর পাঠানো checksum বা size-কে অন্ধভাবে বিশ্বাস করা যাবে না। Backend এবং storage provider-এর verification semantics অনুযায়ী content verify করতে হবে।
+    class U,U2,RECIPIENT user
+    class LB,FE,API,AUTH,FS,UP,QU,SESSION,COMPLETE,UP2,SH,LINK,VS,WORKER,NOTIFY service
+    class PG1,PG2,PG3,PG4,PG5,PG6,REDIS,OBJ,QUEUE storage
+    class GW external
 
-#### **Phase 3: Metadata Commit ও ACID**
+```
+## **4.2 End-to-End Architecture Description**
 
-1. Object storage-এ final object সফলভাবে তৈরি হয়েছে কি না নিশ্চিত করতে হবে।
-2. Database transaction শুরু হবে।
-3. Upload session-এর current status এবং ownership যাচাই হবে।
-4. `files` এবং `file_versions` records তৈরি বা update হবে।
-5. Storage reference, checksum, size এবং active version সংরক্ষণ হবে।
-6. Quota reservation committed usage-এ রূপান্তরিত হবে।
-7. Upload session `COMPLETED` হবে।
-8. একই transaction-এ প্রয়োজনে Outbox event তৈরি হবে।
-9. Transaction commit হওয়ার পর asynchronous notification পাঠানো হবে।
+### **ধাপ ১: User Request ও Authentication**
 
-যদি database transaction ব্যর্থ হয়, object storage-এ তৈরি হওয়া object orphaned থাকতে পারে। Retry বা reconciliation worker সেটি নিরাপদে recover অথবা cleanup করবে।
+এই ধাপে User Cloud File Storage System-এ প্রবেশ করবেন এবং Backend তাঁর identity ও permission যাচাই করবে।
 
-#### **Phase 4: File Download ও Preview**
+1. User Browser বা Mobile App থেকে system-এ প্রবেশ করবেন।
+2. Request HTTPS-এর মাধ্যমে Load Balancer-এ পৌঁছাবে।
+3. Load Balancer request-কে React / Next.js Frontend বা প্রয়োজনীয় Backend API-তে route করবে।
+4. Frontend Node.js / Express API-তে প্রয়োজনীয় request পাঠাবে।
+5. Authentication & Authorization Module access token যাচাই করে User-এর identity ও permission নিশ্চিত করবে।
+6. Request valid হলে সংশ্লিষ্ট File & Folder, Upload, Sharing অথবা Version Service-এ পাঠানো হবে।
 
-1. User file ID দিয়ে download request পাঠাবেন।
-2. Backend file-এর existence, trash status এবং access permission যাচাই করবে।
-3. Authorized হলে short-lived signed download URL দেওয়া হবে, অথবা backend stream করবে।
-4. Browser object storage থেকে file download করবে।
-5. Preview-এর জন্য content type, disposition এবং supported format যাচাই করা হবে।
+**উদ্দেশ্য:** নিরাপদভাবে User request গ্রহণ করা এবং unauthorized access প্রতিরোধ করা।
 
-Private file-এর object URL স্থায়ীভাবে public রাখা যাবে না। Signed URL bearer credential-এর মতো আচরণ করে, তাই মেয়াদ ও scope সীমিত রাখতে হবে।
+### **ধাপ ২: File & Folder Management**
 
-#### **Phase 5: Sharing ও Access Control**
+এই ধাপে User file এবং folder তৈরি, দেখা, rename, move ও delete করতে পারবেন।
 
-1. Owner একটি user বা shareable link নির্বাচন করবেন।
-2. Backend owner-এর permission যাচাই করবে।
-3. `file_permissions` বা share record-এ target user এবং role সংরক্ষণ হবে।
-4. Viewer শুধু দেখতে/download করতে পারবেন।
-5. Commenter দেখতে এবং comment করতে পারবেন।
-6. Editor content edit করতে পারবেন; তবে ownership transfer বা permission management-এর মতো কাজের জন্য আলাদা authorization policy থাকতে পারে।
-7. Permission revoke হলে পরবর্তী request-এ access বন্ধ হবে।
-8. Cached permissions invalidation করতে হবে; আগে তৈরি signed URL expire না হওয়া পর্যন্ত কিছু ক্ষেত্রে access চালু থাকতে পারে।
+1. User Frontend থেকে file বা folder management request পাঠাবেন।
+2. Authentication সফল হলে API request File & Folder Service-এ পাঠাবে।
+3. Service PostgreSQL-এ file ও folder-এর metadata সংরক্ষণ বা update করবে।
+4. Metadata-তে file ID, owner ID, folder ID, object storage key, file size এবং timestamps রাখা যেতে পারে।
+5. File list-এর মতো frequently accessed data Redis Cache-এ রাখা যেতে পারে।
+6. Cache miss হলে Service PostgreSQL থেকে data সংগ্রহ করে Redis update করবে।
+7. File content access করার আগে User-এর permission যাচাই করে Object Storage থেকে content সরবরাহ করা হবে।
 
-Folder sharing থাকলে descendant files-এ permission inheritance কীভাবে হবে তা স্পষ্টভাবে নির্ধারণ করতে হবে। Explicit deny, inherited permission এবং direct grant-এর precedence policy-ও consistent হতে হবে।
+**উদ্দেশ্য:** File ও folder-এর metadata এবং file content আলাদাভাবে পরিচালনা করা।
 
-#### **Phase 6: Versioning ও Restore**
+### **ধাপ ৩: Upload Session ও Quota Validation**
 
-1. Editor file-এর নতুন content upload করবেন।
-2. Backend expected version number বা ETag যাচাই করবে।
-3. নতুন content আলাদা immutable object key-তে সংরক্ষণ হবে।
-4. Database transaction-এ নতুন `file_versions` record তৈরি হবে।
-5. File-এর active version pointer update হবে।
-6. Version conflict হলে request `409 Conflict` দিতে পারে।
-7. Previous version restore করতে পুরোনো version record-কে active করা যায়, অথবা পুরোনো content থেকে নতুন version তৈরি করা যায়।
+এই ধাপে User file upload শুরু করবেন এবং system যাচাই করবে তাঁর storage quota পর্যাপ্ত কি না।
 
-**Recommended approach:** Previous version-এর immutable content রেখে restore-কে নতুন version হিসেবে record করা। এতে version history audit করা সহজ হয়।
+1. User Frontend থেকে Upload Session Service-এ upload request পাঠাবেন।
+2. Service file size, file type এবং upload request-এর বৈধতা যাচাই করবে।
+3. Quota Service PostgreSQL থেকে User-এর বর্তমান storage usage এবং available quota যাচাই করবে।
+4. Quota পর্যাপ্ত হলে একটি upload session তৈরি করা হবে।
+5. একই সঙ্গে session metadata এবং reserved quota সংরক্ষণ করা হবে, যাতে concurrent upload-এর কারণে quota অতিক্রম না হয়।
+6. Upload Session Service Frontend-কে Signed URL অথবা Multipart Upload-এর প্রয়োজনীয় তথ্য দেবে।
+7. Frontend সেই URL ব্যবহার করে সরাসরি Object Storage-এ file upload করবে।
 
-#### **Phase 7: Delete, Trash ও Cleanup**
+**উদ্দেশ্য:** বড় file transfer-এর চাপ Backend থেকে কমানো এবং User-এর storage limit enforce করা।
 
-1. User delete request পাঠাবেন।
-2. Backend ownership বা delete permission যাচাই করবে।
-3. Database transaction-এ file/folder-কে Trash-এ নেওয়া হবে।
-4. Folder delete-এর ক্ষেত্রে descendant files-এর আচরণ নির্ধারিত policy অনুযায়ী কার্যকর হবে।
-5. Trash থেকে restore করলে parent folder-এর existence ও permission যাচাই হবে।
-6. Permanent deletion-এর সময় object storage cleanup job তৈরি হবে।
-7. সব relevant versions, references ও retention policy যাচাই করে unreferenced objects delete করা হবে।
-8. Cleanup সফল হলে related metadata ও quota usage update করা হবে।
+### **ধাপ ৪: Upload Completion ও Metadata Update**
 
-Database থেকে metadata মুছে ফেলার আগে object references এবং retention requirements যাচাই করা জরুরি।
+এই ধাপে Object Storage-এ file upload সম্পন্ন হওয়ার পর Backend upload যাচাই করে metadata finalize করবে।
 
-### **Simple End-to-End Story**
+1. Frontend file upload শেষ হলে Upload Session Service-এ completion request পাঠাবে।
+2. Backend Object Storage-এ uploaded object আছে কি না যাচাই করবে।
+3. File size, checksum এবং upload session-এর status যাচাই করা হবে।
+4. Upload সফল হলে PostgreSQL-এ file metadata finalize করা হবে।
+5. Reserved quota প্রকৃত file size অনুযায়ী update করা হবে।
+6. প্রয়োজনীয় background processing-এর জন্য Queue বা Transactional Outbox-এ event তৈরি করা হবে।
+7. Upload ব্যর্থ বা অসম্পূর্ণ হলে file-কে completed হিসেবে দেখানো হবে না; প্রয়োজনে reservation release এবং incomplete object cleanup করা হবে।
 
-ধরা যাক, Murad একটি 2 GB PDF upload করলেন।
+**উদ্দেশ্য:** File upload, metadata এবং storage quota-এর মধ্যে consistency বজায় রাখা।
 
-1. Backend Murad-এর authentication ও destination folder access যাচাই করল।
-2. PostgreSQL-এ 2 GB-এর জন্য quota reserve হলো।
-3. File chunks আকারে object storage-এ upload হলো।
-4. Network বন্ধ হয়ে গেলে upload session-এর recorded parts ব্যবহার করে upload resume হলো।
-5. সব chunks complete ও verify হওয়ার পর metadata transaction commit হলো।
-6. Murad file-টি একজন colleague-এর সঙ্গে Viewer permission-এ share করলেন।
-7. Colleague permission যাচাই পেরিয়ে signed URL দিয়ে file download করলেন।
-8. Murad updated PDF upload করলে নতুন version তৈরি হলো; পুরোনো version history-তে রইল।
-9. Murad file delete করলে সেটি Trash-এ গেল; permanent deletion-এর আগে worker storage cleanup করল।
+### **ধাপ ৫: File Sharing ও Permission Management**
+
+এই ধাপে File Owner অন্য User-এর সঙ্গে file বা folder share করতে পারবেন।
+
+1. Owner Frontend থেকে Sharing & Permission Service-এ request পাঠাবেন।
+2. Service যাচাই করবে Owner-এর resource share করার permission আছে কি না।
+3. Sharing rules PostgreSQL-এ সংরক্ষণ করা হবে, যেমন recipient, permission level এবং link expiry।
+4. Permission lookup দ্রুত করার জন্য Redis Cache ব্যবহার করা যেতে পারে।
+5. Recipient share link অথবা নিজের account-এর মাধ্যমে file access করার চেষ্টা করবেন।
+6. Backend Recipient-এর permission, link expiry এবং access policy যাচাই করবে।
+7. Permission valid হলে file access দেওয়া হবে; প্রয়োজনে সীমিত মেয়াদের Signed URL তৈরি করা হবে।
+
+**উদ্দেশ্য:** File sharing নিরাপদ রাখা এবং অনুমোদিত User-দের নির্দিষ্ট permission অনুযায়ী access দেওয়া।
+
+**গুরুত্বপূর্ণ:** Permission revoke হলে Redis cache invalidate বা update করতে হবে। Signed URL তৈরি করার পর সেটি expiry পর্যন্ত access দিতে পারে, তাই sensitive file-এর ক্ষেত্রে expiry এবং revocation strategy বিবেচনা করতে হবে।
+
+### **ধাপ ৬: File Version Management**
+
+এই ধাপে User একই file-এর নতুন version upload করতে পারবেন এবং প্রয়োজনে পুরোনো version restore করতে পারবেন।
+
+1. User existing file update করলে Version Service request গ্রহণ করবে।
+2. Service যাচাই করবে User-এর file update করার permission আছে কি না।
+3. নতুন file content Object Storage-এ নতুন object key দিয়ে সংরক্ষণ করা হবে।
+4. PostgreSQL-এ version number, object key, file size এবং timestamp-সহ version metadata সংরক্ষণ করা হবে।
+5. Database-এ current version pointer update করা হবে।
+6. User পুরোনো version restore করলে system সেই version-কে current version হিসেবে নির্ধারণ করতে পারে অথবা নতুন version তৈরি করতে পারে—যেটি নির্বাচিত business rule-এর সঙ্গে সামঞ্জস্যপূর্ণ।
+
+**উদ্দেশ্য:** File-এর পূর্ববর্তী সংস্করণ সংরক্ষণ করা এবং প্রয়োজন হলে আগের version পুনরুদ্ধার করা।
+
+### **ধাপ ৭: Background Processing ও Notification**
+
+এই ধাপে File upload বা অন্যান্য operation-এর পর প্রয়োজনীয় asynchronous কাজ সম্পন্ন করা হবে।
+
+1. Database transaction-এর সঙ্গে Outbox event তৈরি হলে Outbox Relay event Queue-তে publish করবে।
+2. Background Worker Queue থেকে job গ্রহণ করবে।
+3. Worker Object Storage-এর file যাচাই করতে পারে অথবা thumbnail generation, metadata extraction ও integrity checking-এর মতো কাজ করতে পারে।
+4. Processing status PostgreSQL-এ update করা হবে।
+5. Processing সফল বা ব্যর্থ হলে Notification Service প্রয়োজন অনুযায়ী User-কে Email অথবা In-app Notification পাঠাবে।
+6. Job ব্যর্থ হলে retry করা হবে এবং প্রয়োজন অনুযায়ী Dead-Letter Queue-তে পাঠানো হবে।
+
+**উদ্দেশ্য:** Heavy processing-কে মূল API request থেকে আলাদা রাখা এবং notification ও background job নির্ভরযোগ্যভাবে পরিচালনা করা।
+
+### **ধাপ ৮: Failure Handling ও Reliability**
+
+একটি production-ready Cloud File Storage System-এ concurrent upload, storage failure এবং asynchronous processing-এর সমস্যা সামলাতে হবে।
+
+1. **Upload Failure:** Multipart Upload বা resumable upload ব্যবহার করে অসম্পূর্ণ upload পুনরায় শুরু করার ব্যবস্থা রাখতে হবে।
+2. **Quota Race Condition:** Concurrent upload-এর ক্ষেত্রে transaction বা atomic update দিয়ে quota reservation enforce করতে হবে।
+3. **Duplicate Completion Request:** একই upload session বারবার complete করার চেষ্টা হলে idempotency দিয়ে duplicate metadata ও quota update প্রতিরোধ করতে হবে।
+4. **Object Storage Failure:** Database metadata ও stored object-এর মধ্যে অসামঞ্জস্য শনাক্ত এবং recover করার ব্যবস্থা রাখতে হবে।
+5. **Permission Revocation:** Sharing permission পরিবর্তন হলে permission cache invalidate করতে হবে।
+6. **Worker Failure:** Queue job retry করতে হবে এবং repeated failure আলাদাভাবে handle করতে হবে।
+7. **Orphaned Objects:** Database metadata ছাড়া Object Storage-এ পড়ে থাকা file শনাক্ত করে নির্ধারিত policy অনুযায়ী cleanup করতে হবে।
+8. **File Deletion:** Metadata deletion এবং object cleanup-এর মধ্যে consistency বজায় রাখতে প্রয়োজনে asynchronous cleanup ব্যবহার করতে হবে।
+
+**উদ্দেশ্য:** Failure-এর মধ্যেও data consistency, access control এবং storage reliability বজায় রাখা।
 
 ---
+
+## **End-to-End Flow Summary**
+
+1. **User Request:** User request API-তে পৌঁছাবে এবং authentication ও authorization যাচাই হবে।
+2. **File Management:** File ও folder-এর metadata PostgreSQL-এ সংরক্ষণ করা হবে; প্রয়োজন অনুযায়ী Redis cache ব্যবহার হবে।
+3. **Upload Session:** Storage quota যাচাই করে upload session তৈরি করা হবে।
+4. **Direct Upload:** Signed URL / Multipart Upload ব্যবহার করে Object Storage-এ file upload হবে।
+5. **Upload Completion:** Uploaded object যাচাই করে file metadata ও quota finalize করা হবে।
+6. **Sharing:** Permission সংরক্ষণ ও যাচাই করে authorized Recipient-কে access দেওয়া হবে।
+7. **Versioning:** নতুন version-এর content Object Storage-এ এবং version metadata PostgreSQL-এ রাখা হবে।
+8. **Background Processing:** Queue ও Worker asynchronous processing, cleanup এবং notification পরিচালনা করবে।
+9. **Failure Recovery:** Idempotency, quota reservation, retry এবং cleanup mechanism দিয়ে system নির্ভরযোগ্য রাখা হবে।
 
 ## **3.4 Important SQL for Interview**
 

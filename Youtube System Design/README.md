@@ -149,6 +149,199 @@ flowchart TD
     EVENTS --> Q
 ```
 
+### End to End follow Architecture
+```mermaid
+
+flowchart TD
+
+    subgraph S1["① User Request & Authentication"]
+        direction LR
+        U["👤 User / Browser"] --> FE["React / Next.js Frontend"]
+        FE -->|"HTTPS Request"| API["Node.js / Express API"]
+        API --> AUTH["Authentication & Authorization"]
+        AUTH -->|"Authorized Request"| ROUTE["Process API Request"]
+    end
+
+    subgraph S2["② Video Upload & Metadata"]
+        direction LR
+        ROUTE -->|"Upload Video"| UP["Validate Video & Upload"]
+        UP -->|"Store Original Video"| OBJ[("Object Storage")]
+        UP -->|"Save Metadata & Status"| DB[("PostgreSQL")]
+        UP -->|"Publish Processing Job"| Q["Message Queue"]
+    end
+
+    subgraph S3["③ Video Processing & Transcoding"]
+        direction LR
+        Q -->|"Consume Job"| WORKER["Video Processing Worker"]
+        WORKER -->|"Fetch Original Video"| OBJ
+        WORKER --> FFMPEG["FFmpeg Transcoding"]
+        FFMPEG -->|"Generate Resolutions / Segments"| OUT["Processed Video Output"]
+        OUT -->|"Store Processed Files"| OBJ
+        WORKER -->|"Update Processing Status"| DB
+    end
+
+    subgraph S4["④ Video Playback & CDN Delivery"]
+        direction LR
+        FE -->|"Request Video Details / Playback URL"| API
+        ROUTE -->|"Read Metadata"| DB
+        ROUTE -->|"Read Cached Data"| CACHE[("Redis Cache")]
+        ROUTE -->|"Return Metadata / Playback URL"| FE
+        FE --> PLAYER["Video Player"]
+        PLAYER -->|"Request Video / Streaming Segments"| CDN["CDN"]
+        CDN -->|"Fetch on Cache Miss"| OBJ
+        OBJ -->|"Video Content"| CDN
+        CDN -->|"Deliver Video Segments"| PLAYER
+    end
+
+    subgraph S5["⑤ View & Interaction Events"]
+        direction LR
+        PLAYER -->|"Playback Events"| FE
+        FE -->|"View / Like / Comment Events"| API
+        API --> EVENTS["View & Interaction Event Handler"]
+        EVENTS -->|"Publish Events"| Q
+        Q -->|"Consume Events"| EW["Event Processing Worker"]
+        EW -->|"Update Metrics / Interaction Data"| DB
+    end
+
+    classDef user fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    classDef svc fill:#E6F1FB,stroke:#185FA5,color:#042C53
+    classDef storage fill:#EEEDFE,stroke:#534AB7,color:#26215C
+    classDef external fill:#FAEEDA,stroke:#854F0B,color:#412402
+
+    class U user
+    class FE,API,AUTH,ROUTE,UP,WORKER,FFMPEG,OUT,PLAYER,EVENTS,EW svc
+    class DB,CACHE,OBJ,Q storage
+    class CDN external
+
+```
+End-to-End Flow Summary
+
+- 1. User Request: User Frontend থেকে request পাঠাবেন; API authentication ও authorization যাচাই করবে।
+- 2. Video Upload: Backend original video Object Storage-এ রাখবে, metadata PostgreSQL-এ সংরক্ষণ করবে এবং processing job Queue-তে পাঠাবে।
+- 3. Video Processing: Worker Queue থেকে job নিয়ে FFmpeg দিয়ে video transcode করবে; processed output Object Storage-এ রাখবে এবং database status update করবে।
+- 4. Video Playback: Frontend API থেকে video metadata বা playback URL নেবে; Video Player CDN থেকে video content stream করবে। CDN cache miss হলে Object Storage থেকে content সংগ্রহ করবে।
+- 5. Interaction Events: Playback, view ও interaction event Backend-এর মাধ্যমে Queue-তে যাবে; Worker সেগুলো process করে প্রয়োজনীয় metrics বা data update করবে।
+## **Step-by-Step End-to-End Architecture**
+
+### **ধাপ ১: User Request ও Frontend**
+
+এই ধাপে User YouTube-এর মতো platform-এ video দেখতে, search করতে অথবা নিজের video upload করতে পারবেন।
+
+1. User Browser থেকে React / Next.js Frontend-এ প্রবেশ করবেন।
+2. Frontend থেকে video list, search result, video details, comments এবং অন্যান্য প্রয়োজনীয় তথ্য দেখানো হবে।
+3. User login করা থাকলে video upload, like, comment এবং নিজের channel manage করার মতো authenticated action করতে পারবেন।
+4. Frontend User-এর request Node.js / Express API-তে পাঠাবে।
+
+**এই ধাপের উদ্দেশ্য:** User-এর interaction গ্রহণ করা এবং প্রয়োজনীয় request Backend-এ পাঠানো।
+
+### **ধাপ ২: API Request ও Authentication**
+
+এই ধাপে Backend request যাচাই করবে এবং User-এর permission অনুযায়ী কাজ করার অনুমতি দেবে।
+
+1. Node.js / Express API Frontend থেকে request গ্রহণ করবে।
+2. Authentication and Authorization Module User-এর identity এবং access permission যাচাই করবে।
+3. Public video দেখার মতো request authentication ছাড়াই অনুমোদিত হতে পারে। কিন্তু video upload, like, comment বা নিজের video delete করার মতো action-এর জন্য authentication প্রয়োজন হবে।
+4. Permission valid হলে API সংশ্লিষ্ট operation process করবে।
+5. Invalid token অথবা unauthorized action হলে request প্রত্যাখ্যান করা হবে।
+
+**এই ধাপের উদ্দেশ্য:** User-এর identity যাচাই করা এবং unauthorized access প্রতিরোধ করা।
+
+### **ধাপ ৩: Database, Cache ও Object Storage**
+
+এই ধাপে Backend প্রয়োজন অনুযায়ী database, cache এবং object storage ব্যবহার করবে।
+
+1. API video metadata, User information, channel details, comments এবং অন্যান্য structured data সংরক্ষণ ও সংগ্রহ করার জন্য PostgreSQL ব্যবহার করবে।
+2. ঘন ঘন প্রয়োজন হয় এমন video metadata বা অন্য উপযুক্ত data দ্রুত সরবরাহ করার জন্য Redis Cache ব্যবহার করা যেতে পারে।
+3. User video upload করলে মূল video file Object Storage-এ সংরক্ষণ করা হবে।
+4. Object Storage-এ video file-এর পাশাপাশি processed video-এর বিভিন্ন resolution এবং streaming format রাখা যেতে পারে।
+5. PostgreSQL-এ video metadata, storage key, processing status এবং playback-এর প্রয়োজনীয় তথ্য সংরক্ষণ করা হবে।
+6. Redis-এ cache miss হলে Backend database থেকে data নিয়ে cache update করতে পারে।
+
+**এই ধাপের উদ্দেশ্য:** Structured data, frequently accessed data এবং বড় video file-কে আলাদাভাবে পরিচালনা করা।
+
+### **ধাপ ৪: Video Delivery ও CDN**
+
+এই ধাপে User-এর কাছে video দ্রুত এবং কার্যকরভাবে পৌঁছে দেওয়া হবে।
+
+1. Object Storage-এ video file সংরক্ষিত থাকবে।
+2. CDN (Content Delivery Network) Object Storage থেকে video content সরবরাহ করবে এবং উপযুক্ত ক্ষেত্রে edge location-এ cache করবে।
+3. User video play করলে Frontend video playback URL ব্যবহার করে CDN থেকে video content request করবে।
+4. Video Player প্রয়োজন অনুযায়ী video-এর অংশবিশেষ বা streaming segment download করবে।
+5. Video-এর বিভিন্ন resolution থাকলে Player network condition ও supported streaming format অনুযায়ী উপযুক্ত quality নির্বাচন করতে পারে।
+
+**এই ধাপের উদ্দেশ্য:** Origin server-এর ওপর চাপ কমানো, video loading দ্রুত করা এবং বিভিন্ন location-এর User-কে ভালো playback experience দেওয়া।
+
+**গুরুত্বপূর্ণ:** Diagram-এ Object Storage → CDN → Video Player দেখানো হয়েছে। বাস্তবে Frontend API থেকে playback URL বা manifest সংগ্রহ করতে পারে, তারপর Player CDN থেকে video content fetch করে। বড় platform-এ HLS বা MPEG-DASH ব্যবহার করা যেতে পারে।
+
+### **ধাপ ৫: Video Upload ও Processing Queue**
+
+এই ধাপে User-এর upload করা video processing-এর জন্য প্রস্তুত করা হবে।
+
+1. User Frontend থেকে video upload করার request পাঠাবেন।
+2. Backend User-এর permission, file size, file type এবং upload policy যাচাই করবে।
+3. Video file Object Storage-এ upload করা হবে। বড় file-এর ক্ষেত্রে direct upload বা multipart upload ব্যবহার করা যেতে পারে।
+4. Upload সম্পন্ন হলে Backend video metadata এবং processing status PostgreSQL-এ সংরক্ষণ করবে।
+5. Backend Message Queue-তে video processing job publish করবে।
+6. Queue থেকে Video Processing Worker job গ্রহণ করবে।
+
+**এই ধাপের উদ্দেশ্য:** Video upload-এর request-এর মধ্যে ভারী transcoding কাজ না করে সেটিকে asynchronous processing-এর জন্য পাঠানো।
+
+### **ধাপ ৬: Video Processing ও Transcoding**
+
+এই ধাপে Worker upload করা video-কে playback-এর উপযোগী format-এ রূপান্তর করবে।
+
+1. Video Processing Worker Queue থেকে processing job গ্রহণ করবে।
+2. Worker Object Storage থেকে original video সংগ্রহ করবে।
+3. FFmpeg দিয়ে video transcoding করা হবে।
+4. প্রয়োজন অনুযায়ী video-কে বিভিন্ন resolution, bitrate এবং streaming format-এ রূপান্তর করা হবে।
+5. Processed video file বা streaming segment Object Storage-এ সংরক্ষণ করা হবে।
+6. Worker PostgreSQL-এ video-এর processing status update করবে, যেমন `PROCESSING`, `READY` অথবা `FAILED`।
+7. Processing সফল হলে Frontend video-টিকে playback-এর জন্য উপলভ্য হিসেবে দেখাতে পারবে।
+
+**এই ধাপের উদ্দেশ্য:** বিভিন্ন device, screen size এবং network condition-এর জন্য video playback প্রস্তুত করা।
+
+### **ধাপ ৭: View ও Interaction Events**
+
+এই ধাপে User-এর video viewing এবং অন্যান্য interaction থেকে event সংগ্রহ করা হবে।
+
+1. User video play, pause, watch বা like এবং comment-এর মতো interaction করলে Frontend প্রয়োজনীয় event Backend-এ পাঠাতে পারে।
+2. API event যাচাই করে View and Interaction Events processing flow-তে পাঠাবে।
+3. Event Queue-তে publish করা হলে Worker asynchronousভাবে event process করতে পারবে।
+4. প্রয়োজন অনুযায়ী event থেকে view count, engagement metrics এবং analytics data update করা হবে।
+5. PostgreSQL-এ গুরুত্বপূর্ণ structured data সংরক্ষণ করা যেতে পারে; high-volume analytics-এর জন্য আলাদা event storage বা analytics system প্রয়োজন হতে পারে।
+
+**এই ধাপের উদ্দেশ্য:** User interaction সংগ্রহ করা এবং analytics বা engagement data update করার কাজকে মূল video delivery flow থেকে আলাদা রাখা।
+
+**গুরুত্বপূর্ণ:** প্রতিটি `play` event-কে স্বয়ংক্রিয়ভাবে একটি valid view হিসেবে গণনা করা উচিত নয়। View counting-এর জন্য নির্দিষ্ট business rule, duplicate event handling এবং প্রয়োজনীয় validation থাকতে হবে।
+
+### **ধাপ ৮: Failure Handling ও Reliability**
+
+একটি production-ready Video Platform-এ processing failure, duplicate event এবং storage সমস্যা সামলানোর ব্যবস্থা থাকতে হবে।
+
+1. **Upload Failure:** Upload অসম্পূর্ণ হলে retry বা resumable upload-এর ব্যবস্থা রাখা যেতে পারে।
+2. **Processing Failure:** FFmpeg transcoding ব্যর্থ হলে job retry করা হবে অথবা নির্দিষ্ট retry limit শেষে failed হিসেবে চিহ্নিত করা হবে।
+3. **Duplicate Job:** একই processing job একাধিকবার এলে duplicate processing বা metadata corruption প্রতিরোধ করতে idempotent job handling ব্যবহার করতে হবে।
+4. **Queue Failure:** Failed job পুনরায় process করার ব্যবস্থা এবং প্রয়োজনে Dead-Letter Queue রাখা যেতে পারে।
+5. **Cache Failure:** Redis unavailable হলে প্রয়োজন অনুযায়ী database থেকে data পরিবেশন করতে হবে; cache-কে authoritative source হিসেবে ব্যবহার করা যাবে না।
+6. **Storage Failure:** Upload ও processing status যাচাই করে incomplete operation recover করার ব্যবস্থা রাখতে হবে।
+7. **Video Access Control:** Private বা restricted video-এর ক্ষেত্রে playback authorization এবং signed URL বা signed cookie ব্যবহার করা যেতে পারে।
+
+**এই ধাপের উদ্দেশ্য:** Video upload, processing এবং delivery-তে সমস্যা হলেও system-কে নির্ভরযোগ্য রাখা।
+
+---
+
+## **সংক্ষিপ্ত Flow Summary**
+
+1. **User → Frontend:** User video browse, upload এবং interact করবেন।
+2. **Frontend → API:** Request Backend-এ পাঠানো হবে।
+3. **API → Authentication:** Identity ও permission যাচাই করা হবে।
+4. **API → PostgreSQL / Redis / Object Storage:** Metadata, cached data এবং video file পরিচালনা করা হবে।
+5. **Object Storage → CDN → Video Player:** User-এর কাছে video content সরবরাহ করা হবে।
+6. **API → Message Queue → Video Processing Worker:** Upload করা video asynchronousভাবে process হবে।
+7. **Worker → FFmpeg → Object Storage:** Video transcoding করে playback-ready output সংরক্ষণ করা হবে।
+8. **Worker → PostgreSQL:** Processing status update করা হবে।
+9. **API → View and Interaction Events → Queue:** User interaction event analytics processing-এর জন্য পাঠানো হবে।
+10. **Failure Handling:** Retry, idempotency, status tracking এবং access control-এর মাধ্যমে system-এর reliability বজায় রাখা হবে।
 ### 4.2 Component Responsibilities
 
 **Frontend**

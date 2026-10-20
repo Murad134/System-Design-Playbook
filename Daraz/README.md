@@ -154,6 +154,192 @@ sequenceDiagram
 
   > Customer frontend থেকে checkout request পাঠায়। API Gateway request authenticate করে Checkout module-এ পাঠায়। Checkout module PostgreSQL transaction-এর মধ্যে current price validate, inventory reserve, order এবং payment record তৈরি করে। Commit-এর পরে Payment Gateway session শুরু হয়। Gateway webhook এলে Payment module signature verify করে order ও payment update করে। তারপর Outbox/Queue notification এবং tracking update process করে।
 
+
+### End to End follow
+```mermaid
+
+flowchart TB
+
+    subgraph S1["① Product Browsing & Cart"]
+        direction LR
+        U["👤 Customer"] -->|"Browse / Search"| W["React / Next.js App"]
+        W -->|"HTTPS + Session / JWT"| G["API Gateway"]
+        G --> C["Product Catalog"]
+        C -->|"Read products"| DB1[("PostgreSQL")]
+        C <-->|"Cache products"| R[("Redis")]
+        W -->|"Add / Update / Remove"| CART["Cart Module"]
+        CART -->|"Save cart"| DB1
+    end
+
+    subgraph S2["② Checkout & Inventory Reservation"]
+        direction LR
+        CH["Checkout Request"] -->|"Idempotency-Key"| O["Order / Checkout Module"]
+        O -->|"BEGIN TRANSACTION"| DB2[("PostgreSQL")]
+        DB2 -->|"Lock inventory rows"| I["Inventory Module"]
+        I -->|"Check & reserve stock"| ST["Available Stock"]
+        ST -->|"Stock available"| P["Create PENDING Order"]
+        P -->|"COMMIT"| DB2
+    end
+
+    subgraph S3["③ Payment Processing"]
+        direction LR
+        PS["Payment Service"] -->|"Create payment attempt"| PG["External Payment Gateway"]
+        PG -->|"Payment result / Webhook"| WH["Webhook Handler"]
+        WH -->|"Verify signature + event ID"| V["Validate & Deduplicate Event"]
+        V -->|"Verified payment result"| PV["Update Payment Status"]
+    end
+
+    subgraph S4["④ Order Confirmation & Stock Finalization"]
+        direction LR
+        O2["Order Module"] -->|"BEGIN TRANSACTION"| DB3[("PostgreSQL")]
+        DB3 -->|"Lock order / inventory rows"| VAL["Validate payment, order state & stock reservation"]
+        VAL -->|"Valid successful payment"| CONF["CONFIRMED Order"]
+        CONF -->|"Finalize stock deduction"| INV["Update Inventory"]
+        INV -->|"COMMIT"| DB3
+    end
+
+    subgraph S5["⑤ Order Status & Notification"]
+        direction LR
+        ORD["Confirmed Order"] -->|"Create outbox event"| OB[("Transactional Outbox")]
+        OB --> Q["Queue / Background Worker"]
+        Q --> N["Notification Service"]
+        N -->|"Email / SMS / Push"| U2["👤 Customer"]
+        U2 -->|"View order status"| TRACK["Order Tracking API"]
+        TRACK -->|"Polling / WebSocket"| W2["Customer App"]
+    end
+
+    W -->|"Checkout"| CH
+    P -->|"Order ID + amount"| PS
+    PV -->|"Verified payment outcome"| O2
+    DB3 -->|"Confirmation committed"| ORD
+
+    VAL -.->|"Payment failed / reservation expired"| FAIL["Reject confirmation; release stock or initiate refund if charged"]
+    WH -.->|"Duplicate webhook"| V
+
+    classDef user fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    classDef svc fill:#E6F1FB,stroke:#185FA5,color:#042C53
+    classDef ext fill:#FAEEDA,stroke:#854F0B,color:#412402
+    classDef db fill:#EEEDFE,stroke:#534AB7,color:#26215C
+    classDef error fill:#FCEBEB,stroke:#A32D2D,color:#501313
+
+    class U,U2 user
+    class W,G,C,CART,CH,O,I,ST,P,PS,V,PV,O2,VAL,CONF,INV,OB,Q,N,TRACK,W2 svc
+    class PG,WH ext
+    class DB1,DB2,DB3,R db
+    class FAIL error
+
+```
+
+## Step-by-Step End-to-End Architecture
+
+### ধাপ ১: Product Browsing ও Cart Management
+
+এই ধাপে Customer product দেখবেন, search ও filter করবেন এবং পছন্দের product Cart-এ যোগ করবেন।
+
+1. Customer React / Next.js Web App থেকে product list, search, filter অথবা product details দেখার request পাঠাবেন।
+2. Request HTTPS-এর মাধ্যমে API Gateway-তে পৌঁছাবে।
+3. API Gateway প্রয়োজন অনুযায়ী Authentication ও Authorization যাচাই করে Product Catalog Module-এ request পাঠাবে।
+4. Product Catalog Module PostgreSQL থেকে product-এর তথ্য সংগ্রহ করবে। বারবার প্রয়োজন হয় এমন product data দ্রুত সরবরাহ করার জন্য Redis cache ব্যবহার করা যেতে পারে।
+5. Customer কোনো product Cart-এ যোগ, update অথবা remove করলে Cart Module request process করবে।
+6. Cart Module cart-এর পরিবর্তন database-এ সংরক্ষণ করবে, যাতে Customer পরবর্তী সময়ে Cart-এর তথ্য দেখতে পারেন।
+
+**এই ধাপের উদ্দেশ্য:** Product browsing এবং Cart management-এর মাধ্যমে Customer-কে Checkout-এর জন্য প্রস্তুত করা।
+
+### **ধাপ ২: Checkout Request ও Inventory Reservation**
+
+এই ধাপে Customer order place করার চেষ্টা করবেন এবং system নিশ্চিত করবে যে প্রয়োজনীয় product-এর stock পাওয়া যাচ্ছে।
+
+1. Customer Checkout button-এ click করলে Frontend Checkout API-তে request পাঠাবে।
+2. প্রতিটি logical checkout-এর জন্য Frontend একটি `Idempotency-Key` তৈরি করবে। একই checkout-এর retry request-এ একই key ব্যবহার করবে।
+3. Order / Checkout Module key-টি যাচাই করে আগের একই request-এর ফলাফল থাকলে সেটি ফেরত দেবে; নতুন request হলে processing শুরু করবে।
+4. Order Module PostgreSQL transaction শুরু করবে।
+5. Inventory Module সংশ্লিষ্ট product-এর inventory row lock করবে অথবা conditional stock update ব্যবহার করে stock availability যাচাই করবে।
+6. প্রয়োজনীয় stock পাওয়া গেলে system stock reserve করবে এবং `PENDING` status-এ order তৈরি করবে।
+7. Order এবং inventory reservation একই database transaction-এ সফল হলে transaction commit হবে। কোনো operation ব্যর্থ হলে transaction rollback হবে।
+8. Frontend Order ID, payable amount এবং payment-এর পরবর্তী ধাপ সম্পর্কে response পাবে।
+
+**এই ধাপের উদ্দেশ্য:** একই সময়ে একাধিক Customer একই stock কেনার চেষ্টা করলেও overselling প্রতিরোধ করা এবং duplicate checkout থেকে duplicate order তৈরি হওয়া ঠেকানো।
+
+### **ধাপ ৩: Payment Processing**
+
+এই ধাপে Customer-এর payment request process হবে এবং payment-এর প্রকৃত ফলাফল যাচাই করা হবে।
+
+1. Order তৈরি হওয়ার পর Payment Service-এর কাছে Order ID, payable amount এবং payment method পাঠানো হবে।
+2. Payment Service একটি payment attempt তৈরি করবে এবং external payment gateway-তে payment request পাঠাবে।
+3. Customer gateway-এর মাধ্যমে payment complete করবেন।
+4. Payment gateway payment সফল বা ব্যর্থ হওয়ার পর system-কে webhook পাঠাতে পারে।
+5. Webhook Handler প্রথমে webhook signature যাচাই করবে, যাতে অননুমোদিত request গ্রহণ না করা হয়।
+6. Webhook event ID যাচাই করে duplicate event শনাক্ত করা হবে। একই event পুনরায় এলে payment processing যেন দ্বিতীয়বার কার্যকর না হয়, তা নিশ্চিত করা হবে।
+7. Verified payment result অনুযায়ী Payment Service payment record-এর status update করবে।
+
+**এই ধাপের উদ্দেশ্য:** Payment-এর প্রকৃত ফলাফল নির্ভরযোগ্যভাবে যাচাই করা এবং duplicate বা forged webhook থেকে system-কে সুরক্ষিত রাখা।
+
+**গুরুত্বপূর্ণ:** Frontend-এর success page বা browser redirect-কে payment সফল হওয়ার চূড়ান্ত প্রমাণ হিসেবে গ্রহণ করা যাবে না। Verified gateway response বা webhook-এর ওপর নির্ভর করতে হবে।
+
+### **ধাপ ৪: Order Confirmation ও Inventory Finalization**
+
+এই ধাপে system যাচাই করবে যে payment সফল হয়েছে এবং order-এর stock reservation এখনও বৈধ আছে কি না।
+
+1. Verified payment result পাওয়ার পর Order Module order confirmation process শুরু করবে।
+2. PostgreSQL transaction শুরু করে সংশ্লিষ্ট order এবং inventory reservation-এর প্রয়োজনীয় row lock করা হবে।
+3. System যাচাই করবে:
+   - Payment সত্যিই সফল হয়েছে কি না।
+   - Order ইতোমধ্যে confirm বা cancel হয়েছে কি না।
+   - Inventory reservation এখনও valid কি না।
+   - Reservation-এর expiry time পার হয়েছে কি না।
+4. সব শর্ত পূরণ হলে order-এর status `CONFIRMED` করা হবে।
+5. একই transaction-এ inventory reservation finalize করে stock-এর পরিমাণ যথাযথভাবে update করা হবে।
+6. সব database operation সফল হলে transaction commit হবে। কোনো operation ব্যর্থ হলে rollback হবে এবং order-কে confirmed হিসেবে দেখানো হবে না।
+7. Payment সফল হলেও reservation expire হয়ে গেলে order স্বয়ংক্রিয়ভাবে confirm করা যাবে না। Business policy অনুযায়ী payment refund বা compensation process শুরু করতে হবে।
+
+**এই ধাপের উদ্দেশ্য:** Payment, Order এবং Inventory-এর মধ্যে data consistency বজায় রাখা।
+
+**ACID-এর ভূমিকা:**
+- **Atomicity:** Order confirmation এবং stock finalization একসঙ্গে সফল হবে অথবা rollback হবে।
+- **Consistency:** Stock negative হবে না এবং invalid order confirm হবে না।
+- **Isolation:** Concurrent checkout-এর কারণে একই stock একাধিকবার বিক্রি হওয়া প্রতিরোধ করা হবে।
+- **Durability:** Transaction commit হলে confirmation-এর database changes স্থায়ীভাবে সংরক্ষিত থাকবে।
+
+### **ধাপ ৫: Notification ও Order Tracking**
+
+এই ধাপে Customer-কে order confirmation জানানো হবে এবং order-এর বর্তমান status দেখানো হবে।
+
+1. Order confirmation সফলভাবে commit হওয়ার পর database transaction-এর সঙ্গে সম্পর্কিত Transactional Outbox-এ notification event সংরক্ষণ করা হবে।
+2. Background Worker Outbox থেকে event সংগ্রহ করে Queue বা processing mechanism-এর মাধ্যমে notification process করবে।
+3. Notification Service Customer-কে Email, SMS অথবা Push Notification পাঠাবে।
+4. Customer Frontend থেকে Order Tracking API-তে request পাঠিয়ে order-এর বর্তমান status দেখতে পারবেন।
+5. শুরুতে Frontend নির্দিষ্ট interval-এ Polling করে order status update নিতে পারে।
+6. অধিক real-time update প্রয়োজন হলে WebSocket ব্যবহার করা যেতে পারে।
+7. Notification delivery ব্যর্থ হলে retry mechanism ব্যবহার করা হবে। Retry-এর কারণে duplicate notification পাঠানো ঠেকাতে event processing-ও idempotent করা উচিত।
+
+**এই ধাপের উদ্দেশ্য:** Customer-কে order confirmation ও পরবর্তী status সম্পর্কে জানানো এবং notification failure হলেও event হারিয়ে যাওয়ার ঝুঁকি কমানো।
+
+### **ধাপ ৬: Failure Handling ও Recovery**
+
+একটি production-ready E-commerce System-এ শুধু successful flow নয়, failure scenario-ও handle করতে হবে।
+
+1. **Duplicate Checkout:** একই `Idempotency-Key` দিয়ে retry করলে আগের order-এর ফলাফল ফেরত দিতে হবে; নতুন order তৈরি করা যাবে না।
+2. **Insufficient Stock:** প্রয়োজনীয় stock না থাকলে checkout প্রত্যাখ্যান করতে হবে এবং কোনো invalid reservation তৈরি করা যাবে না।
+3. **Payment Failed:** Payment failure হলে order confirm করা যাবে না। Reservation policy অনুযায়ী stock release করতে হবে।
+4. **Duplicate Webhook:** একই gateway event একাধিকবার এলেও payment বা order transition দ্বিতীয়বার কার্যকর করা যাবে না।
+5. **Expired Reservation:** Reservation expire হয়ে গেলে order confirm করা যাবে না। Payment ইতোমধ্যে সফল হলে প্রয়োজন অনুযায়ী refund বা compensation করতে হবে।
+6. **Concurrent Purchase:** Database row lock অথবা atomic conditional update এবং প্রয়োজনীয় constraint ব্যবহার করে overselling প্রতিরোধ করতে হবে।
+7. **Notification Failure:** Transactional Outbox এবং retry mechanism দিয়ে notification পরে আবার process করতে হবে।
+8. **Temporary Service Failure:** প্রয়োজন অনুযায়ী timeout, bounded retry এবং monitoring ব্যবহার করতে হবে। External payment request retry করার সময় gateway-এর idempotency support থাকলে তা ব্যবহার করতে হবে।
+
+**এই ধাপের উদ্দেশ্য:** Network failure, concurrent request, duplicate event এবং external service failure-এর মধ্যেও system-এর data consistency ও business correctness বজায় রাখা।
+
+---
+
+## **সংক্ষিপ্ত Flow Summary**
+
+1. **Product Browsing:** Customer product দেখবেন এবং Cart তৈরি করবেন।
+2. **Checkout:** Backend request যাচাই করে stock reserve এবং `PENDING` order তৈরি করবে।
+3. **Payment:** Payment Service gateway-তে payment request পাঠাবে এবং verified result সংগ্রহ করবে।
+4. **Order Confirmation:** Valid payment ও stock reservation থাকলে ACID transaction-এর মাধ্যমে order confirm হবে।
+5. **Notification:** Transactional Outbox ও Background Worker-এর মাধ্যমে Customer-কে জানানো হবে।
+6. **Order Tracking:** Customer Polling অথবা WebSocket-এর মাধ্যমে order status দেখতে পারবেন।
+7. **Failure Recovery:** Idempotency, database constraints, transaction, retry এবং refund/compensation mechanism দিয়ে failure handle করা হবে।
 ### Complete checkout flow
 
 1. Customer cart থেকে product ID এবং quantity পাঠায়।
