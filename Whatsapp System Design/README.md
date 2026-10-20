@@ -6,7 +6,6 @@
 > **Important:** This is a proposed system design based on common distributed-systems practices. It does not claim to describe WhatsApp's private internal implementation.
 
 ---
-
 ## Contents
 
 1. [Problem Statement](#1-problem-statement)
