@@ -1479,6 +1479,24 @@ Circular Wait → Deadlock
 
 ##### ৫. Deadlock Prevention: 
 এই সমস্যা কমাতে সব transaction-এ সিটগুলোকে একই ক্রমে, যেমন ascending id অনুযায়ী lock করব। ফলে একটি transaction আগে Seat 1 এবং পরে Seat 2 lock করলে অন্য transaction-ও একই order অনুসরণ করবে। এতে উপরের circular-wait পরিস্থিতি এড়ানো যায়।
+
+
+ধরো, Passenger 1 ও Passenger 2 দুই জায়গা থেকে request পাঠাচ্ছে।
+
+১. Passenger-এর request
+Passenger 1  Request  ["DF", "C3"]
+
+Passenger 2  Request  ["C3", "DF"]
+
+Backend-এর Lock Ordering Seat ID অনুযায়ী sort করবে
+
+Passenger 1  C3 → DF
+
+
+Passenger 2  C3 → DF
+
+দুজনের lock order একই!
+
 ##### ৬. Deadlock Recovery: 
 শুধু consistent locking order যথেষ্ট নয়; অন্য table বা resource lock করার কারণে deadlock হতে পারে। তাই database deadlock detect করে কোনো একটি transaction abort করলে, application-এ deadlock error শনাক্ত করে সীমিত সংখ্যক retry এবং exponential backoff ব্যবহার করব।
 ##### ৭. Availability যাচাই: 
