@@ -1,14 +1,14 @@
-# Mobile Banking System (bKash/Nagad-এর মতো MFS) — Complete System Design
+# Mobile Banking System (MFS like bKash/Nagad) — Complete System Design
 
-**ভাষা:** বাংলা  
-**উদ্দেশ্য:** Junior Software Engineer Interview Preparation  
+**Language:** Bengali  
+**Purpose:** Junior Software Engineer Interview Preparation  
 **Difficulty:** Easy–Medium  
-**প্রধান প্রযুক্তি:** React/Next.js, Node.js, Express.js, PostgreSQL  
+**Main Technologies:** React/Next.js, Node.js, Express.js, PostgreSQL  
 **Core Concepts:** ACID, Double-Entry Ledger, Concurrency Control, Idempotency, Webhooks, Refund, Reconciliation
 
 ---
 
-## সূচিপত্র
+## Table of Contents
 
 1. Problem Statement
 2. Requirements Analysis
@@ -19,59 +19,59 @@
 7. ER Diagram
 8. Transaction Status Management
 9. Complete Send Money Flow
-10. Cash In ও Cash Out Flow
-11. Mobile Recharge ও Package Purchase Flow
-12. Wallet, Ledger ও Double-Entry Accounting
+10. Cash In and Cash Out Flow
+11. Mobile Recharge and Package Purchase Flow
+12. Wallet, Ledger and Double-Entry Accounting
 13. ACID Properties
-14. Concurrency Control ও Double Spending Prevention
-15. Idempotency ও Duplicate Request Prevention
-16. Payment Provider Failure, Webhook ও Refund
-17. Security ও Reliability
-18. Scalability ও Performance
-19. Failure Scenarios ও Solutions
+14. Concurrency Control and Double Spending Prevention
+15. Idempotency and Duplicate Request Prevention
+16. Payment Provider Failure, Webhook and Refund
+17. Security and Reliability
+18. Scalability and Performance
+19. Failure Scenarios and Solutions
 20. Test Cases
 21. Implementation Plan
-22. Interview-এ বলার মতো সংক্ষিপ্ত উত্তর
+22. Short Answers to Say in the Interview
 23. Final Interview Checklist
 
 ---
 
 # 1. Problem Statement
 
-ধরা যাক, আমরা **BanglaPay** নামে একটি Mobile Financial Service (MFS) তৈরি করব, যা বিকাশ বা নগদের মতো কাজ করবে।
+Suppose we are building a Mobile Financial Service (MFS) called **BanglaPay**, which will work like bKash or Nagad.
 
-একজন customer account তৈরি করে wallet-এ টাকা রাখতে পারবেন, অন্য customer-কে Send Money করতে পারবেন, agent-এর মাধ্যমে Cash In/Out করতে পারবেন এবং সেই wallet balance ব্যবহার করে GP, Robi, Airtel ও Teletalk নম্বরে mobile recharge বা internet, minute ও SMS package কিনতে পারবেন।
+A customer can create an account and keep money in a wallet, Send Money to another customer, do Cash In/Out through an agent, and use that wallet balance to do mobile recharge on GP, Robi, Airtel and Teletalk numbers or buy internet, minute and SMS packages.
 
-### System-এর প্রধান কাজ
+### Main Functions of the System
 
-- User registration, login, OTP verification ও PIN-based transaction authorization।
-- Wallet balance এবং transaction history দেখা।
-- এক user থেকে অন্য user-কে Send Money করা।
-- Authorized agent-এর মাধ্যমে Cash In ও Cash Out করা।
-- Mobile recharge এবং operator package purchase করা।
-- Transaction fee, daily/monthly limits এবং account restrictions প্রয়োগ করা।
-- Transaction status, receipt ও notification দেখানো।
-- Failed transaction-এর refund/reversal এবং disputed transaction handle করা।
-- Concurrent request, duplicate request ও provider timeout নিরাপদে handle করা।
-- প্রতিটি financial transaction-এর audit trail ও ledger record সংরক্ষণ করা।
+- User registration, login, OTP verification and PIN-based transaction authorization.
+- Viewing wallet balance and transaction history.
+- Sending Money from one user to another user.
+- Cash In and Cash Out through an authorized agent.
+- Mobile recharge and operator package purchase.
+- Applying transaction fees, daily/monthly limits and account restrictions.
+- Showing transaction status, receipt and notification.
+- Refund/reversal of failed transactions and handling disputed transactions.
+- Safely handling concurrent requests, duplicate requests and provider timeouts.
+- Maintaining an audit trail and ledger record of every financial transaction.
 
-### মূল সমস্যা কোথায়?
+### Where Is the Core Problem?
 
-ধরা যাক, Murad-এর wallet-এ ৳1,000 আছে। একই সময়ে দুটি request আসে:
+Suppose Murad has ৳1,000 in his wallet. Two requests arrive at the same time:
 
-- Request A: ৳700 Send Money।
-- Request B: ৳600 Send Money।
+- Request A: Send Money ৳700.
+- Request B: Send Money ৳600.
 
-যদি দুটি request-ই আগের ৳1,000 balance দেখে আলাদাভাবে টাকা কাটে, তাহলে মোট ৳1,300 পাঠানোর চেষ্টা হতে পারে। এটি **race condition এবং double spending**-এর সমস্যা।
+If both requests see the earlier ৳1,000 balance and deduct money separately, a total of ৳1,300 may be attempted to be sent. This is the problem of **race condition and double spending**.
 
-আরেকটি সমস্যা হলো, customer ৳100 recharge করলেন। External provider recharge সফল করল, কিন্তু response ফেরত আসার আগেই network timeout হলো। আমরা যদি যাচাই না করে আবার recharge request পাঠাই, তাহলে একই নম্বরে দুবার recharge হয়ে যেতে পারে।
+Another problem is that a customer recharges ৳100. The external provider makes the recharge successful, but a network timeout happens before the response comes back. If we send the recharge request again without verifying, the same number may get recharged twice.
 
-**মূল design challenge:** Financial transaction-এ কোনো টাকা যেন হারিয়ে না যায়, ভুলভাবে দুবার debit না হয়, এবং failure হলেও wallet ও ledger-এর হিসাব consistent থাকে।
+**Core design challenge:** In a financial transaction, no money should be lost, no wrong double debit should happen, and even in case of failure, the wallet and ledger accounts must remain consistent.
 
-আমাদের দুটি গুরুত্বপূর্ণ নীতি:
+Our two important principles:
 
-1. **Internal money transfer:** PostgreSQL transaction, ACID এবং concurrency control।
-2. **External recharge/package purchase:** Idempotency, pending status, provider verification, retry এবং reconciliation।
+1. **Internal money transfer:** PostgreSQL transaction, ACID and concurrency control.
+2. **External recharge/package purchase:** Idempotency, pending status, provider verification, retry and reconciliation.
 
 ---
 
@@ -85,256 +85,269 @@
 | KYC & Account | Identity verification, active/blocked account |
 | Wallet | Balance, account status, available funds |
 | Send Money | Customer-to-customer transfer |
-| Cash In | Agent-এর মাধ্যমে customer wallet-এ টাকা যোগ |
-| Cash Out | Customer wallet থেকে টাকা তুলে agent-এর কাছ থেকে cash নেওয়া |
-| Recharge | GP, Robi, Airtel, Teletalk-এ mobile recharge |
-| Package Purchase | Internet, minute, SMS বা bundled offer কেনা |
+| Cash In | Adding money to customer wallet through an agent |
+| Cash Out | Withdrawing money from customer wallet and taking cash from an agent |
+| Recharge | Mobile recharge on GP, Robi, Airtel, Teletalk |
+| Package Purchase | Buying internet, minute, SMS or bundled offers |
 | Transaction History | Paginated history, status, receipt |
 | Fee & Limits | Transaction charge, daily/monthly limits |
-| Refund & Dispute | Failed operation recovery এবং complaint |
+| Refund & Dispute | Failed operation recovery and complaint |
 | Agent Management | Agent approval, float balance, commission |
 | Notification | SMS, push notification, transaction alerts |
 | Admin & Audit | Account restrictions, limits, audit, reconciliation |
 
 ## 2.2 Non-Functional Requirements
 
-- **Consistency:** Wallet balance এবং financial ledger-এর হিসাব মিলতে হবে।
-- **Atomicity:** Internal transfer-এ debit ও credit একসঙ্গে commit হবে অথবা কোনোটিই হবে না।
-- **Concurrency:** একসঙ্গে আসা request-এর কারণে balance negative হওয়া যাবে না।
-- **Idempotency:** একই logical request পুনরায় এলেও financial operation দ্বিতীয়বার execute হবে না।
-- **Reliability:** Provider বা network failure হলেও transaction-এর outcome যাচাই করা যাবে।
-- **Security:** PIN hashing, authentication, authorization, rate limiting ও encryption।
-- **Scalability:** API এবং asynchronous worker আলাদাভাবে scale করা যাবে।
-- **Auditability:** কে, কখন, কত টাকা, কোন account-এ পাঠিয়েছে—তার যাচাইযোগ্য record থাকবে।
-- **Observability:** Failed transaction, stuck recharge, database errors ও reconciliation mismatch monitor করা যাবে।
+- **Consistency:** Wallet balance and financial ledger accounts must match.
+- **Atomicity:** In internal transfer, debit and credit will commit together or neither will happen.
+- **Concurrency:** Balance must not become negative due to simultaneous requests.
+- **Idempotency:** Even if the same logical request comes again, the financial operation will not execute a second time.
+- **Reliability:** Even in case of provider or network failure, the transaction outcome can be verified.
+- **Security:** PIN hashing, authentication, authorization, rate limiting and encryption.
+- **Scalability:** API and asynchronous workers can be scaled separately.
+- **Auditability:** There will be a verifiable record of who sent how much money to which account and when.
+- **Observability:** Failed transactions, stuck recharges, database errors and reconciliation mismatches can be monitored.
 
-## 2.3 প্রধান Business Rules
+## 2.3 Main Business Rules
 
-1. Sender এবং receiver account transaction-এর জন্য eligible হতে হবে।
-2. KYC ও account restrictions business policy অনুযায়ী যাচাই করতে হবে।
-3. Amount, fee এবং transaction limits backend-এ যাচাই হবে।
-4. Wallet-এর balance overdraft policy ছাড়া negative হতে পারবে না।
-5. প্রতিটি financial operation-এর unique transaction ID থাকবে।
-6. একই refund operation একাধিকবার execute করা যাবে না।
-7. Ledger entry edit বা delete করে পুরোনো financial history পরিবর্তন করা যাবে না।
-8. Notification failure হলেও committed financial transaction rollback হবে না।
-9. Provider timeout-কে সরাসরি failure ধরা যাবে না; আগে outcome verify করতে হবে।
-10. External provider-এর সঙ্গে database transaction খোলা রেখে network call করা যাবে না।
+1. Sender and receiver accounts must be eligible for the transaction.
+2. KYC and account restrictions must be verified according to business policy.
+3. Amount, fee and transaction limits will be verified in the backend.
+4. Wallet balance cannot become negative without an overdraft policy.
+5. Every financial operation will have a unique transaction ID.
+6. The same refund operation cannot be executed more than once.
+7. Old financial history cannot be changed by editing or deleting ledger entries.
+8. Even if notification fails, a committed financial transaction will not be rolled back.
+9. A provider timeout cannot be treated directly as a failure; the outcome must be verified first.
+10. A network call to an external provider cannot be made while keeping a database transaction open.
 
 ---
 
 # 3. High-Level Architecture
-
 ## 3.1 Full System Architecture
 
-```mermaid
-flowchart TD
-    Customer["Customer App"]
-    Agent["Agent App"]
-    Admin["Admin Dashboard"]
+``` mermaid
 
-    Gateway["HTTPS / API Gateway"]
-    Auth["Authentication & KYC"]
-    Transaction["Transaction Service"]
-    Wallet["Wallet & Ledger Service"]
-    Recharge["Recharge & Package Service"]
-    Risk["Risk, Limits & Fraud Checks"]
+flowchart TB
 
-    DB[("PostgreSQL Primary")]
-    Cache[("Redis Cache")]
-    Outbox["Transactional Outbox"]
-    Queue["Message Queue"]
-    Worker["Background Workers"]
+    subgraph S1["① Frontend Layer"]
+        U["👤 Passenger"] --> W["React / Next.js Web App"]
+    end
 
-    Provider["External Telecom Recharge Provider"]
-    Notify["SMS / Push Notification"]
-    Recon["Reconciliation Service"]
+    subgraph S2["② Backend Layer"]
+        direction LR
+        G["Express API / Auth"]
+        B["Booking Service"]
+        P["Payment Service"]
+        C["Booking Confirmation"]
+        T["Ticket Service"]
+        N["Notification Service"]
 
-    Customer --> Gateway
-    Agent --> Gateway
-    Admin --> Gateway
+        G --> B
+        G --> P
+        B --> C
+        P --> C
+        C --> T
+        T --> N
+    end
 
-    Gateway --> Auth
-    Auth --> Transaction
-    Transaction --> Risk
-    Transaction --> Wallet
-    Transaction --> Recharge
+    subgraph S3["③ Database Layer"]
+        direction LR
+        DB[("PostgreSQL")]
+        TD[("Ticket Records")]
+    end
 
-    Wallet <--> DB
-    Transaction <--> DB
-    Recharge <--> DB
+    subgraph S4["④ External Services"]
+        direction LR
+        PG["Payment Gateway"]
+        MSG["SMS / Email Gateway"]
+    end
 
-    Gateway -. eligible cached reads .-> Cache
+    W -->|"HTTPS + JWT"| G
 
-    DB --> Outbox
-    Outbox --> Queue
-    Queue --> Worker
+    B <-->|"Seat Lock + Booking"| DB
+    C <-->|"Confirm Booking"| DB
+    T -->|"Save Ticket"| TD
 
-    Worker --> Provider
-    Provider --> Worker
-    Worker --> DB
-    Worker --> Notify
-    Worker --> Recon
-    Recon --> DB
+    P <-->|"Payment + Webhook"| PG
+    N -->|"Send E-ticket / Notification"| MSG
+    MSG --> U
+
+    classDef user fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    classDef svc fill:#E6F1FB,stroke:#185FA5,color:#042C53
+    classDef db fill:#EEEDFE,stroke:#534AB7,color:#26215C
+    classDef ext fill:#FAEEDA,stroke:#854F0B,color:#412402
+
+    class U user
+    class W,G,B,P,C,T,N svc
+    class DB,TD db
+    class PG,MSG ext
 ```
 
 ### Arrow follow Diagram
 ```mermaid
-flowchart TD
-    Customer["Customer App"]
-    Agent["Agent App"]
-    Admin["Admin Dashboard"]
 
-    Gateway["HTTPS / API Gateway"]
-    Auth["Authentication & KYC"]
-    Transaction["Transaction Service"]
-    Wallet["Wallet & Ledger Service"]
-    Recharge["Recharge & Package Service"]
-    Risk["Risk, Limits & Fraud Checks"]
+flowchart TB
 
-    DB[("PostgreSQL Primary")]
-    Cache[("Redis Cache")]
-    Outbox["Transactional Outbox"]
-    Queue["Message Queue"]
-    Worker["Background Workers"]
+    subgraph S1["① Booking Request & Seat Hold"]
+        direction LR
+        U["👤 Passenger"] -->|"Select seat"| W["React / Next.js Web App"]
+        W -->|"HTTPS + JWT"| G["Express API / Auth"]
+        G -->|"Authenticated request"| B1["Booking Service"]
+        B1 -->|"BEGIN TRANSACTION"| DB1[("PostgreSQL")]
+        DB1 -->|"Check & lock seat rows"| L["Seat Availability + Row Lock"]
+        L -->|"Seat available"| H["Create PENDING Booking<br/>Hold expires in 10 minutes"]
+        H -->|"COMMIT hold"| DB1
+    end
 
-    Provider["External Telecom Recharge Provider"]
-    Notify["SMS / Push Notification"]
-    Recon["Reconciliation Service"]
+    subgraph S2["② Payment Processing"]
+        direction LR
+        P1["Payment Service"] -->|"Create payment"| PG["External Payment Gateway"]
+        PG -->|"Payment result / Webhook"| WH["Webhook Handler"]
+        WH -->|"Verify signature + event ID"| V["Validate & Deduplicate Event"]
+        V -->|"Verified successful payment"| P2["Payment Service"]
+    end
 
-    Customer --> Gateway
-    Agent --> Gateway
-    Admin --> Gateway
+    subgraph S3["③ Confirm Booking Using ACID"]
+        direction LR
+        B2["Booking Service<br/>Recheck hold & payment"] -->|"BEGIN TRANSACTION"| DB2[("PostgreSQL")]
+        DB2 -->|"Lock booking / seat rows"| R["Validate hold, expiry,<br/>payment and seat ownership"]
+        R -->|"Valid: update booking"| C["CONFIRMED"]
+        C -->|"COMMIT"| DB2
+    end
 
-    Gateway --> Auth
-    Auth --> Transaction
-    Transaction --> Risk
-    Transaction --> Wallet
-    Transaction --> Recharge
+    subgraph S4["④ Ticket & Notification"]
+        direction LR
+        T["Ticket Service"] -->|"Create ticket once"| TD[("Ticket Records")]
+        TD -->|"Ticket ready"| N["Notification Service"]
+        N -->|"SMS / Email + E-ticket"| U2["👤 Passenger"]
+    end
 
-    Wallet <--> DB
-    Transaction <--> DB
-    Recharge <--> DB
+    H ==>|"Booking ID + hold expiry"| P1
+    P2 ==>|"Confirm booking request"| B2
+    DB2 ==>|"Confirmation committed"| T
 
-    Gateway -. eligible cached reads .-> Cache
+    WH -.->|"Duplicate event: no repeated processing"| V
+    R -.->|"Expired / invalid: reject or compensate"| X["Do not confirm<br/>Handle refund if charged"]
 
-    DB --> Outbox
-    Outbox --> Queue
-    Queue --> Worker
+    classDef user fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    classDef svc fill:#E6F1FB,stroke:#185FA5,color:#042C53
+    classDef ext fill:#FAEEDA,stroke:#854F0B,color:#412402
+    classDef db fill:#EEEDFE,stroke:#534AB7,color:#26215C
+    classDef error fill:#FCEBEB,stroke:#A32D2D,color:#501313
 
-    Worker --> Provider
-    Provider --> Worker
-    Worker --> DB
-    Worker --> Notify
-    Worker --> Recon
-    Recon --> DB
+    class U,U2 user
+    class W,G,B1,L,H,P1,V,P2,B2,R,C,T,N svc
+    class PG,WH ext
+    class DB1,DB2,TD db
+    class X error
+
 ```
-
 #### Step 1: Apps → API Gateway
-Customer, Agent ও Admin তাদের app থেকে HTTPS request পাঠায়। API Gateway request গ্রহণ করে এবং সঠিক service-এ route করে।
+Customer, Agent and Admin send HTTPS requests from their apps. The API Gateway receives the request and routes it to the correct service.
 
 #### Step 2: API Gateway → Authentication & KYC
-User-এর identity, authentication token এবং প্রয়োজনীয় KYC status যাচাই করা হয়। অনুমোদিত request পরবর্তী ধাপে যায়।
+The user's identity, authentication token and required KYC status are verified. Approved requests proceed to the next step.
 
 #### Step 3: Authentication → Transaction Service
-Transaction Service টাকা transfer, cash-in, cash-out বা recharge-এর মতো operation পরিচালনা করে।
+The Transaction Service handles operations like money transfer, cash-in, cash-out or recharge.
 
 #### Step 4: Transaction → Risk Service
-Transaction-এর limit, fraud risk এবং account restriction যাচাই করা হয়। Check সফল হলে transaction এগিয়ে যায়।
+The transaction's limits, fraud risk and account restrictions are verified. If the checks succeed, the transaction proceeds.
 
 #### Step 5: Transaction → Wallet / Recharge Service
-টাকা পাঠানো বা wallet balance পরিবর্তনের ক্ষেত্রে Wallet Service কাজ করে। Mobile recharge-এর ক্ষেত্রে Recharge Service operator ও package-সংক্রান্ত তথ্য পরিচালনা করে।
+For sending money or changing wallet balance, the Wallet Service works. For mobile recharge, the Recharge Service manages operator and package-related information.
 
 #### Step 6: Services ↔ PostgreSQL
-Double arrow (<-->) বোঝায় service database-এ data read ও write—দুটিই করতে পারে। Wallet balance, transaction status ও ledger entries যথাযথ database transaction-এর মাধ্যমে সংরক্ষণ করতে হয়।
+The double arrow (<-->) means the service can both read and write data in the database. Wallet balance, transaction status and ledger entries must be stored through proper database transactions.
 
 #### Step 7: API Gateway ⇢ Redis Cache
-Dotted arrow (-.->) cached read-এর optional path বোঝায়। Frequently accessed, non-sensitive বা উপযুক্ত cached data দ্রুত পাওয়া যায়। Financial balance-এর ক্ষেত্রে cache-কে authoritative source হিসেবে ব্যবহার করা উচিত নয়।
+The dotted arrow (-.->) indicates an optional path for cached reads. Frequently accessed, non-sensitive or suitable cached data can be obtained quickly. For financial balance, cache should not be used as the authoritative source.
 
 #### Step 8: PostgreSQL → Outbox → Message Queue
-Transaction-এর সঙ্গে সম্পর্কিত event database-এ নির্ভরযোগ্যভাবে সংরক্ষণ করা হয়। Outbox publisher event-টি queue-তে পাঠায়, যাতে asynchronous কাজ করা যায়।
+Events related to the transaction are reliably stored in the database. The Outbox publisher sends the event to the queue so that asynchronous work can be done.
 
 #### Step 9: Queue → Background Workers
-Worker queue থেকে event নিয়ে background task চালায়—যেমন recharge provider-কে request পাঠানো, notification পাঠানো এবং reconciliation শুরু করা।
+Workers take events from the queue and run background tasks—such as sending requests to the recharge provider, sending notifications and starting reconciliation.
 
 #### Step 10: Worker ↔ Telecom Provider
-Worker external telecom provider-কে recharge request পাঠায়। Provider response দেয়; Worker সেই response অনুযায়ী recharge status update করে।
+The Worker sends a recharge request to the external telecom provider. The provider gives a response; the Worker updates the recharge status according to that response.
 
 #### Step 11: Worker → Notification / Reconciliation
-Worker customer-কে SMS বা push notification পাঠায়। Reconciliation Service internal transaction records-এর সঙ্গে provider-এর records মিলিয়ে দেখে।
+The Worker sends an SMS or push notification to the customer. The Reconciliation Service matches internal transaction records with the provider's records.
 
 #### Step 12: Reconciliation → PostgreSQL
-Reconciliation-এর ফলাফল database-এ সংরক্ষিত হয়। Mismatch হলে সেটি investigation বা correction-এর জন্য চিহ্নিত করা যায়।
+The reconciliation results are stored in the database. If there is a mismatch, it can be flagged for investigation or correction.
 
 
-## 3.2 Component-এর দায়িত্ব
+## 3.2 Responsibilities of Components
 
 **1. Customer App — React Native / Flutter / Web**
 
-- Balance, Send Money, Cash In/Out ও recharge interface।
-- PIN/confirmation flow।
-- Transaction history, receipt এবং status display।
-- Frontend-এ দেখানো balance বা success message-কে financial truth হিসেবে ধরা হবে না।
+- Interface for balance, Send Money, Cash In/Out and recharge.
+- PIN/confirmation flow.
+- Transaction history, receipt and status display.
+- The balance or success message shown in the frontend will not be treated as financial truth.
 
 **2. API Gateway / Express API**
 
-- HTTPS request গ্রহণ।
-- Authentication, input validation, rate limiting ও routing।
-- Request ID এবং correlation ID তৈরি বা propagate করা।
+- Receiving HTTPS requests.
+- Authentication, input validation, rate limiting and routing.
+- Creating or propagating request ID and correlation ID.
 
 **3. Authentication & KYC Module**
 
-- Login, OTP, PIN authorization।
-- User status, KYC status ও permission যাচাই।
-- Sensitive operation-এ অতিরিক্ত verification প্রয়োগ।
+- Login, OTP, PIN authorization.
+- Verifying user status, KYC status and permissions.
+- Applying additional verification on sensitive operations.
 
 **4. Transaction Service**
 
-- Send Money, Cash In, Cash Out এবং transaction lifecycle পরিচালনা।
-- Fee ও limit validation।
-- Duplicate request শনাক্ত করা।
+- Managing Send Money, Cash In, Cash Out and the transaction lifecycle.
+- Fee and limit validation.
+- Detecting duplicate requests.
 
 **5. Wallet & Ledger Service**
 
-- Wallet balance update।
-- Debit/credit এবং double-entry ledger record তৈরি।
-- Atomic database transaction এবং concurrency control enforce করা।
+- Wallet balance update.
+- Creating debit/credit and double-entry ledger records.
+- Enforcing atomic database transactions and concurrency control.
 
 **6. Recharge & Package Service**
 
-- Operator, mobile number, package ও eligibility যাচাই।
-- Recharge order তৈরি এবং provider integration।
-- Provider status verification, refund/release ও reconciliation।
+- Verifying operator, mobile number, package and eligibility.
+- Creating recharge orders and provider integration.
+- Provider status verification, refund/release and reconciliation.
 
 **7. PostgreSQL**
 
-- Wallet, financial transaction, ledger, idempotency record ও outbox সংরক্ষণ।
-- Financial write-এর authoritative source।
+- Storing wallet, financial transaction, ledger, idempotency record and outbox.
+- Authoritative source for financial writes.
 
 **8. Background Worker**
 
-- Recharge request process।
-- Webhook/event processing।
-- Notification delivery, retry ও reconciliation।
+- Processing recharge requests.
+- Webhook/event processing.
+- Notification delivery, retry and reconciliation.
 
-**9. Redis (ঐচ্ছিক)**
+**9. Redis (Optional)**
 
-- Rate limiting, temporary cache বা eligible read optimization।
-- Redis wallet balance-এর authoritative source হবে না।
+- Rate limiting, temporary cache or eligible read optimization.
+- Redis will not be the authoritative source of wallet balance.
 
 ## 3.3 Technology Choices
 
-| Component | Technology | কেন? |
+| Component | Technology | Why? |
 |---|---|---|
 | Frontend | React Native / Flutter | Mobile app |
-| Backend | Node.js + Express.js | REST API ও business logic |
+| Backend | Node.js + Express.js | REST API and business logic |
 | Database | PostgreSQL | ACID, row locking, constraints |
-| Cache | Redis | Rate limit ও eligible cache |
+| Cache | Redis | Rate limit and eligible cache |
 | Queue | RabbitMQ / Kafka | Asynchronous processing |
-| Provider Integration | REST API + Webhooks | Recharge ও package activation |
+| Provider Integration | REST API + Webhooks | Recharge and package activation |
 | Monitoring | Logs, Metrics, Tracing | Failure investigation |
 
-**Junior interview-এর জন্য design decision:** প্রথমে PostgreSQL-সহ একটি modular monolith তৈরি করব। Wallet, ledger ও internal transfer একই database transaction boundary-তে রাখব। Traffic ও team size বাড়লে প্রয়োজন অনুযায়ী services আলাদা করব।
+**Design decision for the junior interview:** First, I will build a modular monolith with PostgreSQL. I will keep the wallet, ledger and internal transfer in the same database transaction boundary. As traffic and team size grow, I will separate services as needed.
 
 ---
 
@@ -342,17 +355,17 @@ Reconciliation-এর ফলাফল database-এ সংরক্ষিত হ�
 
 ## Step 1: Request Initiation — Customer Action
 
-**কী হচ্ছে:** Customer app খুলে balance দেখে ৳1,000 অন্য একজনকে Send Money করতে চান। তিনি receiver-এর mobile number, amount এবং প্রয়োজনীয় authorization দেন।
+**What is happening:** The customer opens the app, sees the balance, and wants to Send Money ৳1,000 to someone else. They provide the receiver's mobile number, amount and required authorization.
 
-**কেন হচ্ছে:** User-এর intended financial operation capture করতে হবে।
+**Why it is happening:** The user's intended financial operation must be captured.
 
-**সুবিধা:** Frontend request তৈরি করবে, কিন্তু final balance বা fee নির্ধারণ করবে backend।
+**Benefit:** The frontend will create the request, but the backend will determine the final balance or fee.
 
 ## Step 2: Customer App → HTTPS → Express REST API
 
-**কী হচ্ছে:** App HTTPS-এর মাধ্যমে API-তে request পাঠাবে।
+**What is happening:** The app will send the request to the API via HTTPS.
 
-উদাহরণ:
+Example:
 
 ```http
 POST /api/v1/transfers
@@ -368,178 +381,178 @@ Content-Type: application/json
 }
 ```
 
-এখানে `amountMinor: 100000` অর্থ ৳1,000, যদি API-তে BDT-এর minor unit হিসেবে পয়সা ব্যবহার করা হয়।
+Here `amountMinor: 100000` means ৳1,000, if the API uses paisa as the minor unit of BDT.
 
-**কেন হচ্ছে:** HTTPS communication encrypt করে এবং Idempotency-Key একই operation-এর retry শনাক্ত করতে সাহায্য করে।
+**Why it is happening:** HTTPS encrypts communication, and the Idempotency-Key helps identify retries of the same operation.
 
-**সুবিধা:** Double-click বা network retry থেকে duplicate transfer-এর ঝুঁকি কমে।
+**Benefit:** The risk of duplicate transfers from double-click or network retry is reduced.
 
 ## Step 3: Authentication, PIN Authorization & Validation
 
-**কী হচ্ছে:** Middleware যাচাই করবে:
+**What is happening:** Middleware will verify:
 
-- Access token বৈধ কি না।
-- User account active কি না।
-- KYC ও transaction permission ঠিক আছে কি না।
-- PIN authorization বা প্রয়োজনীয় step-up verification সফল হয়েছে কি না।
-- Amount valid এবং permitted limit-এর মধ্যে কি না।
-- Receiver account transaction গ্রহণ করতে পারবে কি না।
+- Whether the access token is valid.
+- Whether the user account is active.
+- Whether KYC and transaction permission are correct.
+- Whether PIN authorization or the required step-up verification has succeeded.
+- Whether the amount is valid and within the permitted limit.
+- Whether the receiver account can accept the transaction.
 
-**কেন হচ্ছে:** Unauthorized বা invalid request যেন financial processing-এ প্রবেশ না করে।
+**Why it is happening:** So that unauthorized or invalid requests do not enter financial processing.
 
-**সুবিধা:** Security, compliance এবং business rules শুরুতেই enforce করা যায়।
+**Benefit:** Security, compliance and business rules can be enforced right from the start.
 
 ## Step 4: Transaction Service — Idempotency Check
 
-**কী হচ্ছে:** Server একই user/scope-এর Idempotency-Key আগে ব্যবহার হয়েছে কি না পরীক্ষা করবে।
+**What is happening:** The server will check whether the same user/scope's Idempotency-Key has been used before.
 
-- নতুন key: request process করা হবে।
-- একই key, একই payload: আগের result বা বর্তমান status ফেরত দেওয়া হবে।
-- একই key, ভিন্ন payload: conflict হিসেবে reject করা হবে।
-- আগের request processing-এ থাকলে duplicate operation তৈরি না করে status ফেরত দেওয়া হবে।
+- New key: the request will be processed.
+- Same key, same payload: the previous result or current status will be returned.
+- Same key, different payload: it will be rejected as a conflict.
+- If the previous request is still processing, the status will be returned without creating a duplicate operation.
 
-**কেন হচ্ছে:** Client response হারিয়ে গেলে retry স্বাভাবিক ঘটনা।
+**Why it is happening:** Retry is a normal event when the client loses the response.
 
-**সুবিধা:** একই logical operation একাধিকবার financial effect তৈরি করবে না।
+**Benefit:** The same logical operation will not create a financial effect more than once.
 
 ## Step 5: Begin PostgreSQL Transaction
 
-**কী হচ্ছে:** Internal Send Money-এর জন্য database transaction শুরু হবে।
+**What is happening:** A database transaction will begin for internal Send Money.
 
 ```sql
 BEGIN;
 ```
 
-তারপর sender ও receiver wallet-এর record প্রয়োজন অনুযায়ী lock করা হবে।
+Then the sender's and receiver's wallet records will be locked as needed.
 
-**কেন হচ্ছে:** Debit, credit, transaction record এবং ledger entries একসঙ্গে commit করতে হবে।
+**Why it is happening:** Debit, credit, transaction record and ledger entries must be committed together.
 
-**সুবিধা:** কোনো ধাপে error হলে পুরো internal transfer rollback করা যাবে।
+**Benefit:** If an error occurs at any step, the entire internal transfer can be rolled back.
 
 ## Step 6: Concurrency Control & Balance Validation
 
-**কী হচ্ছে:** PostgreSQL-এর `SELECT ... FOR UPDATE` অথবা conditional update ব্যবহার করে wallet record lock/guard করা হবে।
+**What is happening:** The wallet record will be locked/guarded using PostgreSQL's `SELECT ... FOR UPDATE` or a conditional update.
 
-তারপর যাচাই হবে:
+Then it will be verified:
 
-- Sender-এর account active কি না।
-- Available balance যথেষ্ট কি না।
-- Amount + fee-এর মোট debit অনুমোদিত কি না।
-- Daily/monthly limit অতিক্রম হয়েছে কি না।
+- Whether the sender's account is active.
+- Whether the available balance is sufficient.
+- Whether the total debit of amount + fee is permitted.
+- Whether the daily/monthly limit has been exceeded.
 
-**কেন হচ্ছে:** একই wallet থেকে একসঙ্গে দুটি request এলে stale balance ব্যবহার করে overspending ঠেকাতে হবে।
+**Why it is happening:** When two requests come at the same time from the same wallet, overspending using a stale balance must be prevented.
 
-**সুবিধা:** একই টাকা দুটি transaction-এ খরচ হওয়ার ঝুঁকি প্রতিরোধ করা যায়।
+**Benefit:** The risk of the same money being spent in two transactions can be prevented.
 
 ## Step 7: Debit, Credit & Ledger Entries
 
-**কী হচ্ছে:** সব validation সফল হলে একই database transaction-এর মধ্যে:
+**What is happening:** If all validations succeed, within the same database transaction:
 
-1. Sender wallet থেকে amount + fee debit।
-2. Receiver wallet-এ amount credit।
-3. Transaction record তৈরি।
-4. Balanced ledger entries তৈরি।
-5. প্রয়োজনীয় outbox event insert।
+1. Debit amount + fee from the sender wallet.
+2. Credit the amount to the receiver wallet.
+3. Create the transaction record.
+4. Create balanced ledger entries.
+5. Insert the required outbox event.
 
-**কেন হচ্ছে:** Transfer-এর financial changes-কে একসঙ্গে commit করতে হবে।
+**Why it is happening:** The financial changes of the transfer must be committed together.
 
-**সুবিধা:** Sender-এর debit সফল কিন্তু receiver-এর credit ব্যর্থ—এমন partial transfer স্থায়ী হবে না।
+**Benefit:** A partial transfer—where the sender's debit succeeds but the receiver's credit fails—will not become permanent.
 
 ## Step 8: PostgreSQL Commit & Response
 
-**কী হচ্ছে:** সব update ও constraint check সফল হলে `COMMIT` হবে। তারপর transaction ID ও status response হিসেবে ফেরত যাবে।
+**What is happening:** If all updates and constraint checks succeed, `COMMIT` will happen. Then the transaction ID and status will be returned as the response.
 
-**কেন হচ্ছে:** Committed financial record-ই operation-এর authoritative result।
+**Why it is happening:** The committed financial record is the authoritative result of the operation.
 
-**সুবিধা:** Commit-এর পর response হারিয়ে গেলেও একই idempotency key দিয়ে আগের result পাওয়া যাবে।
+**Benefit:** Even if the response is lost after commit, the previous result can be obtained with the same idempotency key.
 
 ## Step 9: Transactional Outbox & Notification
 
-**কী হচ্ছে:** Financial transaction-এর একই database transaction-এ `outbox_events` record insert করা হবে। Worker পরে event publish করে SMS বা push notification পাঠাবে।
+**What is happening:** In the same database transaction as the financial transaction, an `outbox_events` record will be inserted. The worker will later publish the event and send SMS or push notification.
 
-**কেন হচ্ছে:** Database commit সফল হলেও message broker বা notification service unavailable হতে পারে।
+**Why it is happening:** Even if the database commit succeeds, the message broker or notification service may be unavailable.
 
-**সুবিধা:** Notification failure-এর কারণে successful transfer বাতিল হবে না; event retry করা যাবে।
+**Benefit:** A successful transfer will not be cancelled due to notification failure; the event can be retried.
 
 ## Step 10: Recharge/Package Request Initiation
 
-**কী হচ্ছে:** Customer recharge বা package purchase করলে backend operator, number, package, price এবং eligibility যাচাই করে একটি order তৈরি করবে।
+**What is happening:** When a customer does a recharge or package purchase, the backend will verify operator, number, package, price and eligibility and create an order.
 
-Funds reserve/debit করার policy নির্ধারণ করে order-কে `PENDING` বা `PROCESSING` state-এ রাখা হবে।
+After deciding the policy for reserving/debiting funds, the order will be kept in `PENDING` or `PROCESSING` state.
 
-**কেন হচ্ছে:** Internal wallet debit এবং external operator activation দুটি আলাদা system-এ ঘটে।
+**Why it is happening:** Internal wallet debit and external operator activation happen in two separate systems.
 
-**সুবিধা:** Financial transaction ও provider operation আলাদা lifecycle-এ পরিচালিত হয়।
+**Benefit:** The financial transaction and provider operation are managed in separate lifecycles.
 
 ## Step 11: Outbox Worker → External Provider
 
-**কী হচ্ছে:** Worker provider API-তে recharge/package activation request পাঠাবে। Provider reference এবং idempotency support থাকলে সেটি ব্যবহার করা হবে।
+**What is happening:** The worker will send a recharge/package activation request to the provider API. If the provider reference and idempotency support exist, it will be used.
 
-**কেন হচ্ছে:** External network call-এর সময় PostgreSQL transaction খোলা রাখা উচিত নয়।
+**Why it is happening:** The PostgreSQL transaction should not be kept open during an external network call.
 
-**সুবিধা:** Database connection দীর্ঘ সময় আটকে থাকে না এবং worker independently retry করতে পারে।
+**Benefit:** The database connection is not held for a long time and the worker can retry independently.
 
 ## Step 12: Provider Callback / Webhook
 
-**কী হচ্ছে:** Provider success/failure callback পাঠালে server authenticity/signature, provider reference, amount, number ও status যাচাই করবে।
+**What is happening:** When the provider sends a success/failure callback, the server will verify authenticity/signature, provider reference, amount, number and status.
 
-একই callback একাধিকবার এলে unique event/reference এবং idempotent handler ব্যবহার করা হবে।
+If the same callback comes more than once, a unique event/reference and an idempotent handler will be used.
 
-**কেন হচ্ছে:** Provider retry বা network issue-এর কারণে duplicate callback আসতে পারে।
+**Why it is happening:** Duplicate callbacks may come due to provider retry or network issues.
 
-**সুবিধা:** একই recharge দুবার complete বা refund হওয়ার ঝুঁকি কমে।
+**Benefit:** The risk of the same recharge being completed or refunded twice is reduced.
 
 ## Step 13: Finalize Recharge or Package Purchase
 
-**কী হচ্ছে:**
+**What is happening:**
 
-- Verified success হলে order `SUCCESS` হবে।
-- Confirmed terminal failure হলে refund/release workflow চলবে।
-- Outcome unknown হলে `PENDING/UNKNOWN` রেখে provider status query ও reconciliation করা হবে।
+- If success is verified, the order becomes `SUCCESS`.
+- If terminal failure is confirmed, the refund/release workflow runs.
+- If the outcome is unknown, it is kept as `PENDING/UNKNOWN` and provider status query and reconciliation are done.
 
-**কেন হচ্ছে:** Timeout মানেই recharge failure নয়।
+**Why it is happening:** A timeout does not necessarily mean recharge failure.
 
-**সুবিধা:** Provider operation সফল হলেও internal response হারিয়ে গেলে ভুল refund বা duplicate recharge এড়ানো যায়।
+**Benefit:** Even if the provider operation succeeded but the internal response was lost, wrong refund or duplicate recharge can be avoided.
 
 ## Step 14: Cash In/Out, Reversal & Reconciliation
 
-**কী হচ্ছে:** Cash In/Out-এ agent authorization, float balance, customer eligibility এবং physical cash handover policy যাচাই করা হবে। Refund/reversal-এর জন্য নতুন transaction ও ledger entries তৈরি হবে।
+**What is happening:** In Cash In/Out, agent authorization, float balance, customer eligibility and physical cash handover policy will be verified. For refund/reversal, a new transaction and ledger entries will be created.
 
-Reconciliation worker internal records-এর সঙ্গে provider reports ও settlement records মিলিয়ে দেখবে।
+The reconciliation worker will match internal records with provider reports and settlement records.
 
-**কেন হচ্ছে:** Digital balance এবং বাস্তব cash movement বা external provider outcome সব সময় একই মুহূর্তে নিশ্চিত নাও হতে পারে।
+**Why it is happening:** Digital balance and actual cash movement or external provider outcome may not always be confirmed at the same moment.
 
-**সুবিধা:** Mismatch শনাক্ত, audit এবং controlled recovery করা যায়।
+**Benefit:** Mismatches can be identified, audited and recovered in a controlled manner.
 
 ## Step 15: Monitoring, Receipt & Customer Status
 
-**কী হচ্ছে:** App transaction history/status দেখাবে। Backend metrics, structured logs, tracing এবং alerts দিয়ে failed transactions, stuck orders, duplicate events ও database issues monitor করবে।
+**What is happening:** The app will show transaction history/status. The backend will monitor failed transactions, stuck orders, duplicate events and database issues using metrics, structured logs, tracing and alerts.
 
-**কেন হচ্ছে:** Financial system-এ শুধু success path নয়, failure recovery-ও গুরুত্বপূর্ণ।
+**Why it is happening:** In a financial system, not only the success path but also failure recovery is important.
 
-**সুবিধা:** Customer support ও engineering team দ্রুত সমস্যার কারণ খুঁজে পাবে।
+**Benefit:** The customer support and engineering team can quickly find the cause of problems.
 
 ---
 
 # 5. REST API Design
 
-সব API versioned হবে: `/api/v1/...`। Financial write request-এ authentication, validation, authorization এবং প্রয়োজন অনুযায়ী Idempotency-Key থাকবে।
+All APIs will be versioned: `/api/v1/...`. Financial write requests will have authentication, validation, authorization and, as needed, an Idempotency-Key.
 
 ## 5.1 Authentication & Account APIs
 
-| Method | Endpoint | কাজ |
+| Method | Endpoint | Purpose |
 |---|---|---|
 | POST | `/api/v1/auth/register` | Registration |
 | POST | `/api/v1/auth/verify-otp` | Mobile verification |
 | POST | `/api/v1/auth/login` | Login |
 | POST | `/api/v1/auth/pin/verify` | Sensitive operation authorization |
 | POST | `/api/v1/kyc/submissions` | KYC submission |
-| GET | `/api/v1/me` | নিজের profile |
-| GET | `/api/v1/wallet` | Wallet balance ও summary |
+| GET | `/api/v1/me` | Own profile |
+| GET | `/api/v1/wallet` | Wallet balance and summary |
 
 ## 5.2 Financial APIs
 
-| Method | Endpoint | কাজ |
+| Method | Endpoint | Purpose |
 |---|---|---|
 | POST | `/api/v1/transfers` | Send Money |
 | POST | `/api/v1/agents/cash-ins` | Cash In |
@@ -551,7 +564,7 @@ Reconciliation worker internal records-এর সঙ্গে provider reports �
 
 ## 5.3 Recharge & Package APIs
 
-| Method | Endpoint | কাজ |
+| Method | Endpoint | Purpose |
 |---|---|---|
 | GET | `/api/v1/operators` | Supported operators |
 | GET | `/api/v1/operators/:id/packages` | Available packages |
@@ -562,7 +575,7 @@ Reconciliation worker internal records-এর সঙ্গে provider reports �
 
 ## 5.4 Admin & Agent APIs
 
-| Method | Endpoint | কাজ |
+| Method | Endpoint | Purpose |
 |---|---|---|
 | POST | `/api/v1/admin/agents` | Agent approval/registration |
 | PATCH | `/api/v1/admin/accounts/:id/status` | Account status management |
@@ -570,7 +583,7 @@ Reconciliation worker internal records-এর সঙ্গে provider reports �
 | GET | `/api/v1/admin/audit-logs` | Audit review |
 | GET | `/api/v1/admin/reconciliation` | Reconciliation status |
 
-Admin API-তে Role-Based Access Control (RBAC), least privilege এবং audit logging বাধ্যতামূলক হবে।
+Admin APIs must have Role-Based Access Control (RBAC), least privilege and audit logging.
 
 ## 5.5 Send Money Request Example
 
@@ -588,7 +601,7 @@ Content-Type: application/json
 }
 ```
 
-ধরা যাক, server নির্ধারিত fee ৳5।
+Suppose the fee determined by the server is ৳5.
 
 ```json
 {
@@ -601,35 +614,35 @@ Content-Type: application/json
 }
 ```
 
-এখানে sender-এর মোট debit ৳1,005 এবং receiver পাবেন ৳1,000।
+Here the sender's total debit is ৳1,005 and the receiver will get ৳1,000.
 
-**গুরুত্বপূর্ণ:** Fee client থেকে বিশ্বাস করে নেওয়া যাবে না; backend-এর fee policy অনুযায়ী নির্ধারণ করতে হবে।
+**Important:** The fee cannot be trusted from the client; it must be determined according to the backend's fee policy.
 
 ## 5.6 Error Handling
 
-| HTTP Status | উদাহরণ |
+| HTTP Status | Example |
 |---|---|
 | 400 | Invalid request/amount |
-| 401 | Invalid বা missing authentication |
+| 401 | Invalid or missing authentication |
 | 403 | KYC/account/permission restriction |
-| 404 | Receiver বা transaction পাওয়া যায়নি |
-| 409 | Insufficient balance বা idempotency conflict |
-| 422 | Business rule অনুযায়ী operation গ্রহণযোগ্য নয় |
-| 429 | Rate limit অতিক্রম |
+| 404 | Receiver or transaction not found |
+| 409 | Insufficient balance or idempotency conflict |
+| 422 | Operation not acceptable per business rules |
+| 429 | Rate limit exceeded |
 | 202 | External operation pending |
 | 503 | Temporary service unavailable |
 
-Response-এ machine-readable error code থাকা উচিত, যেমন `INSUFFICIENT_FUNDS`, `ACCOUNT_BLOCKED`, `DUPLICATE_REQUEST`।
+The response should have a machine-readable error code, such as `INSUFFICIENT_FUNDS`, `ACCOUNT_BLOCKED`, `DUPLICATE_REQUEST`.
 
 ---
 
 # 6. Database Design
 
-## 6.1 প্রধান Tables
+## 6.1 Main Tables
 
 ### 1. `users`
 
-| Column | Type | কাজ |
+| Column | Type | Purpose |
 |---|---|---|
 | id | UUID, PK | User ID |
 | phone | VARCHAR, UNIQUE | Mobile number |
@@ -637,11 +650,11 @@ Response-এ machine-readable error code থাকা উচিত, যেমন
 | status | VARCHAR/ENUM | ACTIVE/BLOCKED |
 | created_at | TIMESTAMPTZ | Account creation |
 
-users — User-এর account information, mobile number, secure password hash এবং account status সংরক্ষণ করে।
+users — Stores the user's account information, mobile number, secure password hash and account status.
 
 ### 2. `wallet_accounts`
 
-| Column | Type | কাজ |
+| Column | Type | Purpose |
 |---|---|---|
 | id | UUID, PK | Wallet ID |
 | user_id | UUID, FK | Wallet owner |
@@ -657,14 +670,14 @@ UNIQUE (user_id, currency)
 CHECK (available_balance_minor >= 0)
 ```
 
-`available_balance_minor`-এ টাকা integer minor unit হিসেবে রাখা হবে; floating-point amount ব্যবহার করা হবে না।
+In `available_balance_minor`, money will be kept as an integer minor unit; floating-point amounts will not be used.
 
-wallet_accounts — User-এর wallet, currency, available balance এবং wallet status পরিচালনা করে। Balance integer minor unit-এ রাখা হয়।
+wallet_accounts — Manages the user's wallet, currency, available balance and wallet status. Balance is kept in integer minor units.
 
 
 ### 3. `transactions`
 
-| Column | Type | কাজ |
+| Column | Type | Purpose |
 |---|---|---|
 | id | UUID, PK | Transaction ID |
 | type | VARCHAR/ENUM | SEND_MONEY/CASH_IN/RECHARGE |
@@ -677,12 +690,12 @@ wallet_accounts — User-এর wallet, currency, available balance এবং wa
 | idempotency_key | VARCHAR | Operation reference |
 | created_at | TIMESTAMPTZ | Creation time |
 
-transactions — Money transfer, cash-in ও mobile recharge-এর মতো financial transaction-এর amount, sender, receiver এবং status সংরক্ষণ করে।
+transactions — Stores the amount, sender, receiver and status of financial transactions like money transfer, cash-in and mobile recharge.
 
 
 ### 4. `ledger_entries`
 
-| Column | Type | কাজ |
+| Column | Type | Purpose |
 |---|---|---|
 | id | UUID, PK | Ledger entry ID |
 | transaction_id | UUID, FK | Business transaction |
@@ -691,23 +704,23 @@ transactions — Money transfer, cash-in ও mobile recharge-এর মতো fi
 | amount_minor | BIGINT | Entry amount |
 | created_at | TIMESTAMPTZ | Entry time |
 
-Ledger append-only হবে। পুরোনো entry update/delete করে financial history পরিবর্তন করা যাবে না।
+The ledger will be append-only. Financial history cannot be changed by updating/deleting old entries.
 
-ledger_entries — প্রতিটি financial transaction-এর Debit/Credit entry ও financial history রাখে। এটি append-only, তাই পুরোনো entry পরিবর্তন বা delete করা যাবে না।
+ledger_entries — Keeps the Debit/Credit entries and financial history of every financial transaction. It is append-only, so old entries cannot be changed or deleted.
 
 
 ### 5. `kyc_records`
 
-User-এর KYC status, verification reference এবং verification metadata রাখবে।
+Will keep the user's KYC status, verification reference and verification metadata.
 
-kyc_records — User-এর পরিচয় যাচাইয়ের (KYC) status, verification reference এবং metadata সংরক্ষণ করে।
+kyc_records — Stores the user's identity verification (KYC) status, verification reference and metadata.
 
 
 ### 6. `agents`
 
-Agent-এর user reference, agent code, approval status ও operational details রাখবে।
+Will keep the agent's user reference, agent code, approval status and operational details.
 
-agents — Agent-এর user reference, unique agent code, approval status এবং operational information রাখে।
+agents — Keeps the agent's user reference, unique agent code, approval status and operational information.
 
 
 ### 7. `recharge_orders`
@@ -720,7 +733,7 @@ agents — Agent-এর user reference, unique agent code, approval status এ�
 - Order status
 - Retry/reconciliation metadata
 
-recharge_orders — Mobile recharge-এর operator, mobile number reference, amount/package, provider reference এবং recharge status সংরক্ষণ করে।
+recharge_orders — Stores the mobile recharge's operator, mobile number reference, amount/package, provider reference and recharge status.
 
 
 ### 8. `packages`
@@ -733,7 +746,7 @@ recharge_orders — Mobile recharge-এর operator, mobile number reference, am
 - Eligibility
 - Active status
 
-packages — Mobile operator-এর recharge package, price, validity, eligibility এবং active status পরিচালনা করে।
+packages — Manages the mobile operator's recharge packages, price, validity, eligibility and active status.
 
 ### 9. `idempotency_keys`
 
@@ -744,39 +757,39 @@ packages — Mobile operator-এর recharge package, price, validity, eligibili
 - Processing/result status
 - Stored response reference
 
-idempotency_keys — একই request retry হলেও duplicate financial transaction তৈরি হওয়া আটকাতে request key, payload hash এবং result reference রাখে।
+idempotency_keys — To prevent duplicate financial transactions from being created even when the same request is retried, it keeps the request key, payload hash and result reference.
 
 ### 10. `refunds`
 
-Original transaction ID, refund operation ID, amount, reason, status এবং provider reference রাখবে।
+Will keep the original transaction ID, refund operation ID, amount, reason, status and provider reference.
 
-refunds — Original transaction-এর বিপরীতে refund amount, reason, status এবং provider reference সংরক্ষণ করে।
+refunds — Stores the refund amount, reason, status and provider reference against the original transaction.
 
 
 ### 11. `outbox_events`
 
-Financial transaction-এর সঙ্গে atomically তৈরি event ও publish status রাখবে।
+Will keep the event created atomically with the financial transaction and its publish status.
 
-outbox_events — Financial transaction-এর সঙ্গে একই database transaction-এ তৈরি event সংরক্ষণ করে, যাতে পরে নির্ভরযোগ্যভাবে publish করা যায়।
+outbox_events — Stores the event created in the same database transaction as the financial transaction, so that it can be published reliably later.
 
 
 ### 12. `audit_logs`
 
-Administrative action, actor, timestamp, target, reason ও correlation reference রাখবে। PIN, OTP বা access token log করা যাবে না।
+Will keep administrative action, actor, timestamp, target, reason and correlation reference. PIN, OTP or access token must not be logged.
 
-audit_logs — Admin-এর action, actor, timestamp, target এবং reason-এর audit history রাখে। PIN, OTP বা access token log করা যাবে না।
+audit_logs — Keeps the audit history of the admin's action, actor, timestamp, target and reason. PIN, OTP or access token must not be logged.
 
-## 6.2 গুরুত্বপূর্ণ Database Constraints
+## 6.2 Important Database Constraints
 
-- `users.phone` unique হবে।
-- `(user_id, currency)` wallet-এর জন্য unique হবে।
-- Transaction এবং ledger entries-এর foreign key থাকবে।
-- `(scope, idempotency_key)` unique হবে।
-- Provider-এর unique transaction/event reference duplicate processing ঠেকাবে।
-- Amount positive এবং fee non-negative হবে।
-- Account policy অনুযায়ী overdraft নিষিদ্ধ হলে balance negative হতে পারবে না।
-- Original transaction-এর একই refund operation duplicate করা যাবে না।
-- Ledger entry সাধারণ application permission দিয়ে update/delete করা যাবে না।
+- `users.phone` will be unique.
+- `(user_id, currency)` will be unique for the wallet.
+- Transactions and ledger entries will have foreign keys.
+- `(scope, idempotency_key)` will be unique.
+- The provider's unique transaction/event reference will prevent duplicate processing.
+- Amount will be positive and fee will be non-negative.
+- If overdraft is prohibited by account policy, balance cannot become negative.
+- The same refund operation of the original transaction cannot be duplicated.
+- Ledger entries cannot be updated/deleted with normal application permission.
 
 ## 6.3 Sample PostgreSQL Schema
 
@@ -815,7 +828,7 @@ CREATE TABLE ledger_entries (
 );
 ```
 
-এটি একটি **simplified schema**, সম্পূর্ণ production-ready schema নয়। Production implementation-এ sender/receiver references, accounting account types, idempotency, refund links, provider references এবং transaction boundary-তে ledger invariants enforce করতে হবে।
+This is a **simplified schema**, not a complete production-ready schema. In a production implementation, sender/receiver references, accounting account types, idempotency, refund links, provider references and ledger invariants at the transaction boundary must be enforced.
 
 ---
 
@@ -838,16 +851,16 @@ erDiagram
     TRANSACTIONS ||--o{ OUTBOX_EVENTS : publishes
 ```
 
-**ব্যাখ্যা:** `transactions` হলো business event, আর `ledger_entries` হলো সেই event-এর accounting records। একটি transaction-এ একাধিক debit/credit entry থাকতে পারে। Recharge বা package purchase-এর external provider reference আলাদাভাবে সংরক্ষণ করা হবে।
+
+**Explanation:** `transactions` is the business event, and `ledger_entries` are the accounting records of that event. A transaction can have multiple debit/credit entries. The external provider reference of a recharge or package purchase will be stored separately.
 
 ---
 
 # 8. Transaction Status Management
 
-সব operation-এর জন্য একটি status lifecycle ব্যবহার করা ঠিক হবে না। Internal transfer এবং external recharge-এর failure model আলাদা।
+It is not right to use a single status lifecycle for all operations. The failure models of internal transfer and external recharge are different.
 
 ## 8.1 Send Money State
-
 ```mermaid
 stateDiagram-v2
     [*] --> CREATED
@@ -858,7 +871,9 @@ stateDiagram-v2
     FAILED --> [*]
 ```
 
-Internal transfer-এ `SUCCESS` হবে তখনই, যখন debit, credit, ledger entries ও transaction record একই database transaction-এ commit হয়েছে।
+
+
+In internal transfer, `SUCCESS` will happen only when the debit, credit, ledger entries and transaction record have been committed in the same database transaction.
 
 ## 8.2 Recharge State
 
@@ -878,38 +893,38 @@ stateDiagram-v2
     REFUNDED --> [*]
 ```
 
-`UNKNOWN` মানে outcome এখনো নিশ্চিত নয়। এটি `FAILED`-এর সমার্থক নয়।
+`UNKNOWN` means the outcome is not yet confirmed. It is not a synonym for `FAILED`.
 
 ### State Transition Rules
 
-- `SUCCESS → FAILED` সরাসরি transition অনুমোদন করা যাবে না।
-- Refund-এর নিজস্ব transaction ID ও ledger entries থাকবে।
-- একই callback একাধিকবার এলেও একবারই financial effect হবে।
-- Confirmed failure হলে policy অনুযায়ী refund বা reserved funds release করা হবে।
-- Late success এলে existing state, provider evidence ও ledger যাচাই করে audited recovery করতে হবে।
+- Direct `SUCCESS → FAILED` transition cannot be allowed.
+- A refund will have its own transaction ID and ledger entries.
+- Even if the same callback comes multiple times, the financial effect will happen only once.
+- If failure is confirmed, a refund or release of reserved funds will be done according to policy.
+- If a late success arrives, audited recovery must be done after verifying the existing state, provider evidence and ledger.
 
 ---
 
 # 9. Complete Send Money Flow
 
-ধরি, Murad-এর wallet-এ ৳5,000 আছে। তিনি Rahim-কে ৳1,000 পাঠাবেন এবং fee ৳5।
+Suppose Murad has ৳5,000 in his wallet. He will send ৳1,000 to Rahim and the fee is ৳5.
 
 ## Step-by-Step Workflow
 
-1. Murad app-এ receiver ও amount নির্বাচন করেন।
-2. App `POST /api/v1/transfers` request পাঠায়।
-3. Server JWT/session, PIN authorization, account status, KYC, limits ও receiver যাচাই করে।
-4. Server Idempotency-Key পরীক্ষা করে।
-5. PostgreSQL transaction শুরু হয়।
-6. Sender ও receiver wallet row deterministic order-এ lock করা হয়।
-7. Sender-এর balance ৳1,005-এর সমান বা বেশি কি না যাচাই হয়।
-8. Sender wallet থেকে ৳1,005 debit করা হয়।
-9. Receiver wallet-এ ৳1,000 credit করা হয়।
-10. Fee policy অনুযায়ী ৳5 fee-revenue account-এ credit record করা হয়।
-11. Transaction, balanced ledger entries এবং outbox event insert করা হয়।
-12. সব সফল হলে `COMMIT`; error হলে `ROLLBACK`।
-13. Client-কে transaction ID ও status ফেরত দেওয়া হয়।
-14. Outbox worker SMS/push notification পাঠায়।
+1. Murad selects the receiver and amount in the app.
+2. The app sends a `POST /api/v1/transfers` request.
+3. The server verifies JWT/session, PIN authorization, account status, KYC, limits and receiver.
+4. The server checks the Idempotency-Key.
+5. A PostgreSQL transaction begins.
+6. The sender and receiver wallet rows are locked in a deterministic order.
+7. It is verified whether the sender's balance is equal to or greater than ৳1,005.
+8. ৳1,005 is debited from the sender wallet.
+9. ৳1,000 is credited to the receiver wallet.
+10. According to the fee policy, ৳5 fee is recorded as a credit to the fee-revenue account.
+11. The transaction, balanced ledger entries and outbox event are inserted.
+12. If everything succeeds, `COMMIT`; if there is an error, `ROLLBACK`.
+13. The transaction ID and status are returned to the client.
+14. The outbox worker sends SMS/push notification.
 
 ## Simplified SQL Logic
 
@@ -944,147 +959,147 @@ WHERE id = :receiver_id;
 COMMIT;
 ```
 
-এটি conceptual SQL flow। Production code-এ sender ও receiver আলাদা হওয়া, account status, fee accounting, ledger balance এবং affected-row count যাচাই করতে হবে।
+This is a conceptual SQL flow. In production code, the sender and receiver being different, account status, fee accounting, ledger balance and affected-row count must be verified.
 
-### কেন একই transaction?
+### Why the Same Transaction?
 
-যদি sender debit হয় কিন্তু receiver credit ব্যর্থ হয়, তাহলে `ROLLBACK` পুরো operation বাতিল করবে। ফলে database-এ partial transfer স্থায়ী হবে না।
+If the sender is debited but the receiver credit fails, `ROLLBACK` will cancel the entire operation. As a result, a partial transfer will not become permanent in the database.
 
 ---
 
-# 10. Cash In ও Cash Out Flow
+# 10. Cash In and Cash Out Flow
 
-Cash In/Out শুধু wallet balance update নয়। এখানে electronic money movement এবং physical cash handover—দুটোই সঠিকভাবে manage করতে হবে।
+Cash In/Out is not just a wallet balance update. Here, both electronic money movement and physical cash handover must be managed correctly.
 
 ## 10.1 Cash In
 
-ধরি, customer agent-কে নগদ ৳2,000 দিলেন।
+Suppose the customer gave the agent ৳2,000 in cash.
 
-1. Agent authenticated ও approved কি না যাচাই।
-2. Customer account, KYC ও transaction limits যাচাই।
-3. Agent-এর float balance এবং cash-in policy যাচাই।
-4. প্রয়োজন অনুযায়ী customer confirmation/OTP নেওয়া।
-5. PostgreSQL transaction-এ সংশ্লিষ্ট financial account ও ledger entries update করা।
-6. Agent-এর electronic float থেকে customer wallet-এ ৳2,000 transfer record করা—যদি ব্যবহৃত settlement model সেটি হয়।
-7. Commission থাকলে আলাদা accounting entries তৈরি করা।
-8. Commit-এর পরে receipt ও notification পাঠানো।
+1. Verify that the agent is authenticated and approved.
+2. Verify customer account, KYC and transaction limits.
+3. Verify the agent's float balance and cash-in policy.
+4. Take customer confirmation/OTP as needed.
+5. Update the relevant financial accounts and ledger entries in a PostgreSQL transaction.
+6. Record the transfer of ৳2,000 from the agent's electronic float to the customer wallet—if that is the settlement model being used.
+7. If there is commission, create separate accounting entries.
+8. Send receipt and notification after commit.
 
-**গুরুত্বপূর্ণ:** Agent float-এর accounting model business অনুযায়ী আলাদা হতে পারে। Cash In-এর ledger design সেই model-এর সঙ্গে মিলতে হবে।
+**Important:** The accounting model of agent float may differ according to the business. The ledger design of Cash In must match that model.
 
 ## 10.2 Cash Out
 
-Customer agent-এর কাছ থেকে নগদ টাকা তুলবেন।
+The customer will withdraw cash from an agent.
 
-1. Customer ও agent-এর eligibility যাচাই।
-2. Customer-এর available balance, fee এবং withdrawal limit যাচাই।
-3. Agent-এর authorization এবং cash availability policy যাচাই।
-4. Financial transaction ও ledger entries atomicভাবে record করা।
-5. Agent customer-কে physical cash প্রদান করবেন।
-6. Customer confirmation, receipt এবং audit record সংরক্ষণ হবে।
+1. Verify the eligibility of customer and agent.
+2. Verify the customer's available balance, fee and withdrawal limit.
+3. Verify the agent's authorization and cash availability policy.
+4. Record the financial transaction and ledger entries atomically.
+5. The agent will give physical cash to the customer.
+6. Customer confirmation, receipt and audit record will be stored.
 
-**Failure scenario:** Wallet debit হয়েছে, কিন্তু agent cash দিতে পারেননি। তখন সরাসরি transaction record মুছে ফেলা যাবে না। Dispute/confirmation policy অনুযায়ী investigation এবং প্রয়োজন হলে compensating reversal করতে হবে।
+**Failure scenario:** The wallet was debited, but the agent could not give the cash. In that case, the transaction record cannot be directly deleted. Investigation must be done according to the dispute/confirmation policy and, if needed, a compensating reversal must be done.
 
 ---
 
-# 11. Mobile Recharge ও Package Purchase Flow
+# 11. Mobile Recharge and Package Purchase Flow
 
-ধরি, Murad wallet থেকে ৳100 দিয়ে GP নম্বরে recharge করতে চান।
+Suppose Murad wants to recharge a GP number with ৳100 from his wallet.
 
 ## Step-by-Step Workflow
 
-1. Customer operator, mobile number ও amount নির্বাচন করেন।
-2. Backend number format, operator, limits এবং eligibility যাচাই করে।
-3. Unique Idempotency-Key দিয়ে recharge order তৈরি হয়।
-4. Internal database transaction-এ funds reserve বা debit policy অনুযায়ী financial record তৈরি হয়।
-5. `outbox_events`-এ provider request event insert হয়।
-6. Database commit হওয়ার পরে worker event process করে।
-7. Worker external provider API-তে recharge request পাঠায়।
-8. Provider reference এবং status সংরক্ষণ করা হয়।
-9. Provider callback/webhook এলে signature/authenticity ও reference যাচাই হয়।
-10. Verified success হলে order `SUCCESS` হয়।
-11. Confirmed failure হলে refund/release workflow চলে।
-12. Outcome unknown হলে order pending থাকে এবং provider status query/reconciliation হয়।
-13. Outbox worker notification পাঠায়।
+1. The customer selects the operator, mobile number and amount.
+2. The backend verifies number format, operator, limits and eligibility.
+3. A recharge order is created with a unique Idempotency-Key.
+4. In an internal database transaction, a financial record is created according to the funds reserve or debit policy.
+5. A provider request event is inserted into `outbox_events`.
+6. After the database commit, the worker processes the event.
+7. The worker sends a recharge request to the external provider API.
+8. The provider reference and status are stored.
+9. When a provider callback/webhook arrives, signature/authenticity and reference are verified.
+10. If success is verified, the order becomes `SUCCESS`.
+11. If failure is confirmed, the refund/release workflow runs.
+12. If the outcome is unknown, the order stays pending and provider status query/reconciliation is done.
+13. The outbox worker sends notification.
 
-## 11.1 টাকা আগে debit করব, নাকি reserve করব?
+## 11.1 Should We Debit First, or Reserve?
 
-দুটি design সম্ভব।
+Two designs are possible.
 
 **Option A — Immediate Debit**
 
-- Customer-এর wallet থেকে টাকা debit হবে।
-- Recharge order pending থাকবে।
-- Provider success হলে order complete হবে।
-- Confirmed failure হলে compensating refund entry তৈরি হবে।
+- Money will be debited from the customer's wallet.
+- The recharge order will remain pending.
+- If the provider succeeds, the order will complete.
+- If failure is confirmed, a compensating refund entry will be created.
 
 **Option B — Funds Reservation**
 
-- Available funds-এর একটি অংশ reserve করা হবে।
-- Provider success হলে reservation capture/finalize হবে।
-- Confirmed failure হলে reservation release হবে।
+- A portion of the available funds will be reserved.
+- If the provider succeeds, the reservation will be captured/finalized.
+- If failure is confirmed, the reservation will be released.
 
-Reservation model ব্যবহার করলে available balance এবং reserved balance আলাদা করে model করতে হবে। শুধু একটি balance field-কে “reserved” বলা যথেষ্ট নয়।
+If the reservation model is used, available balance and reserved balance must be modeled separately. Merely calling a single balance field "reserved" is not sufficient.
 
-## 11.2 Provider Timeout হলে কী করব?
+## 11.2 What to Do If the Provider Times Out?
 
-ধরি:
+Suppose:
 
-1. BanglaPay recharge request পাঠাল।
-2. Provider recharge সফল করল।
-3. Response ফেরত আসার আগে network timeout হলো।
+1. BanglaPay sent the recharge request.
+2. The provider made the recharge successful.
+3. A network timeout happened before the response came back.
 
-এখন system জানে না recharge সফল হয়েছে কি না।
+Now the system does not know whether the recharge succeeded.
 
-সঠিক পদক্ষেপ:
+Correct steps:
 
-- Order `PENDING/UNKNOWN` থাকবে।
-- Provider status query করা হবে।
-- Provider-এর idempotency support থাকলে একই logical operation reference ব্যবহার করা হবে।
-- Provider contract নিরাপদ retry নিশ্চিত না করলে blind retry করা হবে না।
-- Confirmed success হলে order complete হবে।
-- Confirmed terminal failure হলে refund/release হবে।
-- Outcome অজানা থাকলে reconciliation queue-তে যাবে।
+- The order will remain `PENDING/UNKNOWN`.
+- Provider status will be queried.
+- If the provider supports idempotency, the same logical operation reference will be used.
+- If the provider contract does not guarantee safe retry, no blind retry will be done.
+- If success is confirmed, the order will complete.
+- If terminal failure is confirmed, refund/release will happen.
+- If the outcome remains unknown, it will go to the reconciliation queue.
 
-**মনে রাখবে: Timeout মানে failure নয়; timeout মানে outcome এখনো জানা যায়নি।**
+**Remember: Timeout does not mean failure; timeout means the outcome is not yet known.**
 
-## 11.3 Package Purchase-এর অতিরিক্ত বিষয়
+## 11.3 Additional Points for Package Purchase
 
-Package purchase-এ backend যাচাই করবে:
+In package purchase, the backend will verify:
 
-- Operator এবং provider package ID।
-- Package price, validity ও type।
-- Mobile number ও customer eligibility।
-- Purchase-time price snapshot।
-- Activation reference এবং activation status।
+- Operator and provider package ID.
+- Package price, validity and type.
+- Mobile number and customer eligibility.
+- Purchase-time price snapshot.
+- Activation reference and activation status.
 
-Payment সফল হলেও package activation ব্যর্থ হতে পারে। সেক্ষেত্রে provider status query, safe retry বা refund workflow প্রয়োজন।
+Even if payment succeeds, package activation may fail. In that case, provider status query, safe retry or refund workflow is needed.
 
 ---
 
-# 12. Wallet, Ledger ও Double-Entry Accounting
+# 12. Wallet, Ledger and Double-Entry Accounting
 
-এটি পুরো system-এর সবচেয়ে গুরুত্বপূর্ণ অংশ।
+This is the most important part of the whole system.
 
-## 12.1 Wallet Balance বনাম Ledger
+## 12.1 Wallet Balance vs Ledger
 
-**Wallet balance:** Customer বর্তমানে কত টাকা খরচ করতে পারবেন।
+**Wallet balance:** How much money the customer can currently spend.
 
-**Ledger:** প্রতিটি financial operation-এ কোন account থেকে কত debit হয়েছে এবং কোন account-এ কত credit হয়েছে তার accounting journal।
+**Ledger:** The accounting journal of how much was debited from which account and how much was credited to which account in every financial operation.
 
-দুটো রাখার কারণ:
+Reasons for keeping both:
 
-- Balance দ্রুত পড়া যায়।
-- Ledger থেকে প্রতিটি financial movement audit করা যায়।
-- Balance ও ledger mismatch হলে reconciliation করা যায়।
-- Refund, reversal ও fee-এর accounting history বজায় থাকে।
+- Balance can be read quickly.
+- Every financial movement can be audited from the ledger.
+- If balance and ledger mismatch, reconciliation can be done.
+- The accounting history of refund, reversal and fee is maintained.
 
-Wallet balance একটি projection হতে পারে, কিন্তু সেটি ledger-এর সঙ্গে consistent রাখতে হবে।
+Wallet balance can be a projection, but it must be kept consistent with the ledger.
 
 ## 12.2 Double-Entry Ledger
 
-প্রতিটি financial transaction-এ মোট debit এবং credit সমান হতে হবে।
+In every financial transaction, total debit and credit must be equal.
 
-ধরি, Murad ৳1,000 Send Money করলেন এবং fee ৳5। Customer wallet-গুলোকে platform liability হিসেবে ধরা হলো।
+Suppose Murad sends ৳1,000 Send Money and the fee is ৳5. Customer wallets are treated as platform liabilities.
 
 | Account | Debit | Credit |
 |---|---:|---:|
@@ -1093,52 +1108,52 @@ Wallet balance একটি projection হতে পারে, কিন্ত�
 | Fee revenue | — | ৳5 |
 | **Total** | **৳1,005** | **৳1,005** |
 
-এই accounting model-এ sender-এর wallet liability ৳1,005 কমে, receiver-এর liability ৳1,000 বাড়ে এবং platform-এর fee revenue ৳5 হয়।
+In this accounting model, the sender's wallet liability decreases by ৳1,005, the receiver's liability increases by ৳1,000 and the platform's fee revenue is ৳5.
 
-বাস্তব accounting model-এ agent settlement, commission ও অন্যান্য account থাকলে অতিরিক্ত entries লাগতে পারে।
+In a real accounting model, if there are agent settlement, commission and other accounts, additional entries may be needed.
 
 ## 12.3 Ledger Rules
 
-- Ledger entry append-only হবে।
-- পুরোনো entry update/delete করা যাবে না।
-- ভুল transaction ঠিক করতে compensating entry তৈরি করতে হবে।
-- প্রতিটি financial transaction-এর debit/credit invariant enforce করতে হবে।
-- Wallet balance ও ledger নিয়মিত reconcile করতে হবে।
-- Refund আলাদা transaction হিসেবে record করতে হবে।
+- Ledger entries will be append-only.
+- Old entries cannot be updated/deleted.
+- To correct a wrong transaction, a compensating entry must be created.
+- The debit/credit invariant of every financial transaction must be enforced.
+- Wallet balance and ledger must be reconciled regularly.
+- A refund must be recorded as a separate transaction.
 
 ---
 
 # 13. ACID Properties
 
-| Property | Mobile Banking-এ প্রয়োগ |
+| Property | Application in Mobile Banking |
 |---|---|
-| **Atomicity** | Send Money-এর debit, credit, ledger ও outbox write একসঙ্গে commit/rollback |
-| **Consistency** | Balance constraints, valid states ও balanced ledger বজায় রাখা |
-| **Isolation** | Concurrent transaction-এর মধ্যে row locks বা conditional updates দিয়ে conflicting write control |
-| **Durability** | Successful commit-এর financial records durable storage-এ রাখা; backup ও recovery প্রস্তুত রাখা |
+| **Atomicity** | Debit, credit, ledger and outbox writes of Send Money commit/rollback together |
+| **Consistency** | Maintaining balance constraints, valid states and balanced ledger |
+| **Isolation** | Controlling conflicting writes between concurrent transactions using row locks or conditional updates |
+| **Durability** | Keeping the financial records of a successful commit in durable storage; keeping backup and recovery ready |
 
 ## Atomicity Example
 
-Murad ৳1,000 পাঠাচ্ছেন।
+Murad is sending ৳1,000.
 
-- Sender debit সফল।
-- Receiver credit-এর সময় error।
+- Sender debit succeeds.
+- Error during receiver credit.
 
-একই PostgreSQL transaction হলে পুরো operation `ROLLBACK` হবে। Sender-এর debit স্থায়ী হবে না।
+If it is the same PostgreSQL transaction, the entire operation will `ROLLBACK`. The sender's debit will not become permanent.
 
 ## Consistency Example
 
-Wallet balance negative হওয়া নিষিদ্ধ। Database constraint ও atomic balance update দিয়ে এই invariant enforce করা হবে।
+Wallet balance cannot be negative. This invariant will be enforced by database constraint and atomic balance update.
 
 ## Isolation Example
 
-একই সময়ে ৳700 ও ৳600 transfer request এলে row locking বা conditional update নিশ্চিত করবে যে ৳1,000 balance থেকে সর্বোচ্চ একটি transaction সফল হতে পারে।
+If ৳700 and ৳600 transfer requests come at the same time, row locking or conditional update will ensure that at most one transaction can succeed from a ৳1,000 balance.
 
 ## Durability Example
 
-Commit-এর পরে application response হারিয়ে গেলেও database-এ transaction record থাকবে। Client একই idempotency key দিয়ে retry করলে আগের result পাবে।
+Even if the application response is lost after commit, the transaction record will remain in the database. If the client retries with the same idempotency key, it will get the previous result.
 
-**গুরুত্বপূর্ণ:** ACID একই database transaction-এর জন্য প্রযোজ্য। External recharge provider-কে PostgreSQL-এর একই ACID transaction-এর মধ্যে অন্তর্ভুক্ত করা যায় না। External workflow-এর জন্য state machine, idempotency, retry ও reconciliation প্রয়োজন।
+**Important:** ACID applies to the same database transaction. The external recharge provider cannot be included within the same ACID transaction of PostgreSQL. For external workflows, state machine, idempotency, retry and reconciliation are needed.
 
 ---
 
@@ -1146,12 +1161,12 @@ Commit-এর পরে application response হারিয়ে গেলেও 
 
 ## Problem
 
-Murad-এর balance ৳1,000। একই সময়ে:
+Murad's balance is ৳1,000. At the same time:
 
-- Request A: ৳700 transfer।
-- Request B: ৳600 transfer।
+- Request A: ৳700 transfer.
+- Request B: ৳600 transfer.
 
-দুটি request একই stale balance ব্যবহার করলে overspending হতে পারে।
+If both requests use the same stale balance, overspending can happen.
 
 ## Solution 1 — Row-Level Locking
 
@@ -1177,7 +1192,7 @@ WHERE id = :sender_id
 COMMIT;
 ```
 
-একই wallet-এর conflicting request row lock-এর কারণে serialize হবে। দ্বিতীয় request প্রথমটির commit-এর পরে updated balance দেখবে।
+Conflicting requests of the same wallet will be serialized due to the row lock. The second request will see the updated balance after the first one's commit.
 
 ## Solution 2 — Conditional Update
 
@@ -1190,38 +1205,38 @@ WHERE id = :sender_id
 RETURNING available_balance_minor;
 ```
 
-যদি কোনো row return না হয়, তাহলে balance যথেষ্ট নয় বা update-এর শর্ত পূরণ হয়নি।
+If no row is returned, the balance is insufficient or the update condition was not met.
 
 ## Deadlock Prevention
 
-Sender ও receiver wallet একসঙ্গে lock করতে হলে deterministic order-এ lock করা ভালো, যেমন wallet ID অনুযায়ী `ORDER BY id FOR UPDATE`।
+If the sender and receiver wallets must be locked together, it is better to lock them in a deterministic order, such as `ORDER BY id FOR UPDATE` by wallet ID.
 
-এতে deadlock-এর ঝুঁকি কমে। তবুও deadlock detection এবং bounded retry প্রয়োজন হতে পারে।
+This reduces the risk of deadlock. Still, deadlock detection and bounded retry may be needed.
 
-**Interview answer:** “I would use PostgreSQL row-level locking or an atomic conditional update to prevent overspending. The debit, credit and ledger writes would be committed in a single database transaction.”
+**Interview answer:** "I would use PostgreSQL row-level locking or an atomic conditional update to prevent overspending. The debit, credit and ledger writes would be committed in a single database transaction."
 
 ---
 
 # 15. Idempotency — Duplicate Request Prevention
 
-Mobile network-এ timeout খুব স্বাভাবিক। Client request পাঠিয়েছে, server commit করেছে, কিন্তু response হারিয়ে গেছে। Client আবার request পাঠালে টাকা দ্বিতীয়বার কাটা যাবে না।
+Timeouts are very common in mobile networks. The client sent a request, the server committed, but the response was lost. If the client sends the request again, money will not be deducted a second time.
 
-## 15.1 কীভাবে কাজ করে?
+## 15.1 How Does It Work?
 
-প্রতিটি logical financial operation-এর জন্য একটি unique key থাকবে:
+Every logical financial operation will have a unique key:
 
 ```http
 Idempotency-Key: 5ef0c8e8-unique-operation
 ```
 
-Database-এ সংরক্ষণ করা হবে:
+The following will be stored in the database:
 
 - User/client scope
 - Idempotency key
 - Request payload hash
 - Associated transaction ID
 - Processing/result status
-- প্রয়োজনে response reference
+- Response reference if needed
 
 Unique constraint:
 
@@ -1229,18 +1244,18 @@ Unique constraint:
 UNIQUE (scope, idempotency_key)
 ```
 
-## 15.2 চারটি পরিস্থিতি
+## 15.2 Four Situations
 
 | Situation | System Behaviour |
 |---|---|
-| নতুন key | Request process হবে |
-| একই key, একই payload, completed | আগের result ফেরত দেবে |
-| একই key, একই payload, processing | Existing status/pending result ফেরত দেবে |
-| একই key, ভিন্ন payload | Conflict হিসেবে reject করবে |
+| New key | Request will be processed |
+| Same key, same payload, completed | Will return the previous result |
+| Same key, same payload, processing | Will return the existing status/pending result |
+| Same key, different payload | Will reject as a conflict |
 
-Idempotency record এবং internal financial transaction এমনভাবে coordinate করতে হবে যেন commit হওয়া transaction-এর result হারিয়ে না যায়।
+The idempotency record and the internal financial transaction must be coordinated so that the result of a committed transaction is not lost.
 
-**মনে রাখবে:** Idempotency duplicate logical request আটকায়; row locking এবং balance constraints concurrent overspending আটকায়। দুটো একসঙ্গে প্রয়োজন।
+**Remember:** Idempotency prevents duplicate logical requests; row locking and balance constraints prevent concurrent overspending. Both are needed together.
 
 ---
 
@@ -1248,28 +1263,28 @@ Idempotency record এবং internal financial transaction এমনভাব�
 
 ## 16.1 Duplicate Webhook
 
-**সমস্যা:** Provider একই recharge success event তিনবার পাঠায়।
+**Problem:** The provider sends the same recharge success event three times.
 
 **Solution:**
 
-1. Provider signature/authenticity যাচাই।
-2. Event/reference database-এ unique constraint দিয়ে সংরক্ষণ।
-3. Existing event হলে duplicate financial processing বন্ধ।
-4. Transaction status transition atomicভাবে enforce।
-5. Notification এবং downstream event idempotently process।
+1. Verify provider signature/authenticity.
+2. Store event/reference in the database with a unique constraint.
+3. If the event already exists, stop duplicate financial processing.
+4. Enforce transaction status transition atomically.
+5. Process notification and downstream events idempotently.
 
-## 16.2 Payment Successful, কিন্তু Package Activate হয়নি
+## 16.2 Payment Successful, But Package Not Activated
 
-**সমস্যা:** Customer-এর টাকা debit হয়েছে, কিন্তু operator package activate করেনি।
+**Problem:** The customer's money was debited, but the operator did not activate the package.
 
 **Solution:**
 
-1. Order pending রাখব।
-2. Provider activation status query করব।
-3. Confirmed success হলে order complete।
-4. Confirmed terminal failure হলে refund/release workflow।
-5. Outcome unknown থাকলে reconciliation queue-তে পাঠাব।
+1. I will keep the order pending.
+2. I will query the provider activation status.
+3. If success is confirmed, the order completes.
+4. If terminal failure is confirmed, refund/release workflow.
+5. If the outcome remains unknown, I will send it to the reconciliation queue.
 
-## 16.3 Refund কীভাবে হবে?
+## 16.3 How Will Refund Work?
 
-Refund-এর জন্য:
+For refund:
