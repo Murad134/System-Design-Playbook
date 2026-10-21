@@ -157,17 +157,20 @@ sequenceDiagram
 ### End-to-End Flow
 
 ```mermaid
+
 flowchart TB
 
     subgraph S1["① Product Browsing & Cart"]
         direction LR
-        U["👤 Customer"] -->|"Browse / Search"| W["React / Next.js App"]
+        U["👤 Customer"] -->|"Browse / Search / Cart Actions"| W["React / Next.js App"]
         W -->|"HTTPS + Session / JWT"| G["API Gateway"]
-        G --> C["Product Catalog"]
+
+        G -->|"Browse / Search Products"| C["Product Catalog"]
         C -->|"Read products"| DB1[("PostgreSQL")]
         C <-->|"Cache products"| R[("Redis")]
-        W -->|"Add / Update / Remove"| CART["Cart Module"]
-        CART -->|"Save cart"| DB1
+
+        G -->|"Add / Update / Remove Items"| CART["Cart Module"]
+        CART -->|"Save / Read Cart"| DB1
     end
 
     subgraph S2["② Checkout & Inventory Reservation"]
@@ -207,7 +210,8 @@ flowchart TB
         TRACK -->|"Polling / WebSocket"| W2["Customer App"]
     end
 
-    W -->|"Checkout"| CH
+    W -->|"Checkout"| G
+    G -->|"Authenticated checkout request"| CH
     P -->|"Order ID + amount"| PS
     PV -->|"Verified payment outcome"| O2
     DB3 -->|"Confirmation committed"| ORD
