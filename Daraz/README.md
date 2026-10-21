@@ -249,6 +249,20 @@ At this stage, the customer browses products, searches and filters them, and add
 
 ### Step 2: Checkout Request and Inventory Reservation
 
+```mermaid
+
+flowchart TD
+    A["Customer Checkout"] --> B["Check Available Stock"]
+    B --> C{"Stock Available?"}
+    C -->|Yes| D["Reserve Stock"]
+    C -->|No| E["Reject Order"]
+    D --> F["Create PENDING Order"]
+    F --> G{"Payment Successful?"}
+    G -->|Yes| H["Confirm Order"]
+    G -->|No / Timeout| I["Release Reserved Stock"]
+
+```
+
 At this stage, the customer attempts to place an order, and the system ensures that the required product stock is available.
 
 1. When the customer clicks the Checkout button, the frontend sends a request to the Checkout API.
