@@ -294,6 +294,21 @@ At this stage, the customer's payment request is processed and the actual paymen
 
 ### Step 4: Order Confirmation and Inventory Finalization
 
+```mermaid
+
+flowchart TD
+    A["Customer Makes Payment"] --> B["Payment Gateway"]
+    B --> C["Webhook Handler"]
+    C --> D["Verify Signature & Duplicate Event"]
+    D --> E["Update Payment Status"]
+    E --> F["Order Module"]
+    F --> G["Validate Payment, Order & Stock"]
+    G --> H{"Everything Valid?"}
+    H -->|Yes| I["Order = CONFIRMED"]
+    H -->|No| J["Reject Confirmation / Refund if Needed"]
+
+```
+
 At this stage, the system verifies that the payment succeeded and that the order's stock reservation is still valid.
 
 1. After receiving the verified payment result, the Order Module starts the order confirmation process.
