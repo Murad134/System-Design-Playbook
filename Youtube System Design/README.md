@@ -151,7 +151,6 @@ flowchart TD
 
 ### End to End follow Architecture
 ```mermaid
-
 flowchart TD
 
     subgraph S1["① User Request & Authentication"]
@@ -166,24 +165,30 @@ flowchart TD
         direction LR
         ROUTE -->|"Upload Video"| UP["Validate Video & Upload"]
         UP -->|"Store Original Video"| OBJ[("Object Storage")]
-        UP -->|"Save Metadata & Status"| DB[("PostgreSQL")]
-        UP -->|"Publish Processing Job"| Q["Message Queue"]
+        UP -->|"ACID Transaction: Save Metadata + Status"| DB[("PostgreSQL")]
+        DB --- DBNOTE["Row Lock: Only if concurrent updates need coordination"]
+        UP -->|"Publish Job via Transactional Outbox"| OUTBOX["Outbox Publisher"]
+        OUTBOX -->|"Publish Processing Job"| Q["Message Queue"]
     end
 
     subgraph S3["③ Video Processing & Transcoding"]
         direction LR
         Q -->|"Consume Job"| WORKER["Video Processing Worker"]
+        WORKER --> IDEM["Idempotency Check + Atomic Job Claim"]
+        IDEM -->|"Claimed Job"| FFMPEG["FFmpeg Transcoding"]
+        IDEM -.->|"Row-Level Lock if needed"| DB
+        WORKER -.->|"Mutex: Process-local shared state only"| MUTEX["In-Process Mutex"]
         WORKER -->|"Fetch Original Video"| OBJ
-        WORKER --> FFMPEG["FFmpeg Transcoding"]
         FFMPEG -->|"Generate Resolutions / Segments"| OUT["Processed Video Output"]
         OUT -->|"Store Processed Files"| OBJ
-        WORKER -->|"Update Processing Status"| DB
+        WORKER -->|"ACID Transaction: Update Status"| DB
+        WORKER -->|"Retry on Failure"| RETRY["Retry Policy / Dead-Letter Queue"]
     end
 
     subgraph S4["④ Video Playback & CDN Delivery"]
         direction LR
         FE -->|"Request Video Details / Playback URL"| API
-        ROUTE -->|"Read Metadata"| DB
+        ROUTE -->|"Read Metadata on Cache Miss"| DB
         ROUTE -->|"Read Cached Data"| CACHE[("Redis Cache")]
         ROUTE -->|"Return Metadata / Playback URL"| FE
         FE --> PLAYER["Video Player"]
@@ -191,6 +196,7 @@ flowchart TD
         CDN -->|"Fetch on Cache Miss"| OBJ
         OBJ -->|"Video Content"| CDN
         CDN -->|"Deliver Video Segments"| PLAYER
+        PLAYNOTE["Row Lock / Mutex: Normally not needed for playback reads"]
     end
 
     subgraph S5["⑤ View & Interaction Events"]
@@ -198,21 +204,25 @@ flowchart TD
         PLAYER -->|"Playback Events"| FE
         FE -->|"View / Like / Comment Events"| API
         API --> EVENTS["View & Interaction Event Handler"]
-        EVENTS -->|"Publish Events"| Q
+        EVENTS -->|"ACID Transaction: Save Interaction + Outbox Event"| DB
+        EVENTS -->|"Publish via Outbox"| OUTBOX
         Q -->|"Consume Events"| EW["Event Processing Worker"]
-        EW -->|"Update Metrics / Interaction Data"| DB
+        EW -->|"Idempotency Check: Avoid Duplicate Effects"| IDEM
+        EW -->|"ACID Transaction + Unique Constraint"| DB
+        EW -.->|"Row-Level Lock if concurrent updates require it"| DB
     end
 
     classDef user fill:#E1F5EE,stroke:#0F6E56,color:#04342C
     classDef svc fill:#E6F1FB,stroke:#185FA5,color:#042C53
     classDef storage fill:#EEEDFE,stroke:#534AB7,color:#26215C
     classDef external fill:#FAEEDA,stroke:#854F0B,color:#412402
+    classDef note fill:#FFF3CD,stroke:#997404,color:#533F03
 
     class U user
-    class FE,API,AUTH,ROUTE,UP,WORKER,FFMPEG,OUT,PLAYER,EVENTS,EW svc
+    class FE,API,AUTH,ROUTE,UP,WORKER,FFMPEG,OUT,PLAYER,EVENTS,EW,OUTBOX,IDEM,RETRY,MUTEX svc
     class DB,CACHE,OBJ,Q storage
     class CDN external
-
+    class DBNOTE,PLAYNOTE note
 ```
 End-to-End Flow Summary
 
