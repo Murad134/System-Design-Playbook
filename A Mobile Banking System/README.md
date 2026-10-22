@@ -127,120 +127,106 @@ Our two important principles:
 ## 3.1 Full System Architecture
 
 ``` mermaid
+flowchart TD
+    Customer["Customer App"]
+    Agent["Agent App"]
+    Admin["Admin Dashboard"]
 
-flowchart TB
+    Gateway["HTTPS / API Gateway"]
+    Auth["Authentication & KYC"]
+    Transaction["Transaction Service"]
+    Wallet["Wallet & Ledger Service"]
+    Recharge["Recharge & Package Service"]
+    Risk["Risk, Limits & Fraud Checks"]
 
-    subgraph S1["① Frontend Layer"]
-        U["👤 Passenger"] --> W["React / Next.js Web App"]
-    end
+    DB[("PostgreSQL Primary")]
+    Cache[("Redis Cache")]
+    Outbox["Transactional Outbox"]
+    Queue["Message Queue"]
+    Worker["Background Workers"]
 
-    subgraph S2["② Backend Layer"]
-        direction LR
-        G["Express API / Auth"]
-        B["Booking Service"]
-        P["Payment Service"]
-        C["Booking Confirmation"]
-        T["Ticket Service"]
-        N["Notification Service"]
+    Provider["External Telecom Recharge Provider"]
+    Notify["SMS / Push Notification"]
+    Recon["Reconciliation Service"]
 
-        G --> B
-        G --> P
-        B --> C
-        P --> C
-        C --> T
-        T --> N
-    end
+    Customer --> Gateway
+    Agent --> Gateway
+    Admin --> Gateway
 
-    subgraph S3["③ Database Layer"]
-        direction LR
-        DB[("PostgreSQL")]
-        TD[("Ticket Records")]
-    end
+    Gateway --> Auth
+    Auth --> Transaction
+    Transaction --> Risk
+    Transaction --> Wallet
+    Transaction --> Recharge
 
-    subgraph S4["④ External Services"]
-        direction LR
-        PG["Payment Gateway"]
-        MSG["SMS / Email Gateway"]
-    end
+    Wallet <--> DB
+    Transaction <--> DB
+    Recharge <--> DB
 
-    W -->|"HTTPS + JWT"| G
+    Gateway -. eligible cached reads .-> Cache
 
-    B <-->|"Seat Lock + Booking"| DB
-    C <-->|"Confirm Booking"| DB
-    T -->|"Save Ticket"| TD
+    DB --> Outbox
+    Outbox --> Queue
+    Queue --> Worker
 
-    P <-->|"Payment + Webhook"| PG
-    N -->|"Send E-ticket / Notification"| MSG
-    MSG --> U
-
-    classDef user fill:#E1F5EE,stroke:#0F6E56,color:#04342C
-    classDef svc fill:#E6F1FB,stroke:#185FA5,color:#042C53
-    classDef db fill:#EEEDFE,stroke:#534AB7,color:#26215C
-    classDef ext fill:#FAEEDA,stroke:#854F0B,color:#412402
-
-    class U user
-    class W,G,B,P,C,T,N svc
-    class DB,TD db
-    class PG,MSG ext
+    Worker --> Provider
+    Provider --> Worker
+    Worker --> DB
+    Worker --> Notify
+    Worker --> Recon
+    Recon --> DB
 ```
 
 ### Arrow follow Diagram
 ```mermaid
+flowchart TD
+    Customer["Customer App"]
+    Agent["Agent App"]
+    Admin["Admin Dashboard"]
 
-flowchart TB
+    Gateway["HTTPS / API Gateway"]
+    Auth["Authentication & KYC"]
+    Transaction["Transaction Service"]
+    Wallet["Wallet & Ledger Service"]
+    Recharge["Recharge & Package Service"]
+    Risk["Risk, Limits & Fraud Checks"]
 
-    subgraph S1["① Booking Request & Seat Hold"]
-        direction LR
-        U["👤 Passenger"] -->|"Select seat"| W["React / Next.js Web App"]
-        W -->|"HTTPS + JWT"| G["Express API / Auth"]
-        G -->|"Authenticated request"| B1["Booking Service"]
-        B1 -->|"BEGIN TRANSACTION"| DB1[("PostgreSQL")]
-        DB1 -->|"Check & lock seat rows"| L["Seat Availability + Row Lock"]
-        L -->|"Seat available"| H["Create PENDING Booking<br/>Hold expires in 10 minutes"]
-        H -->|"COMMIT hold"| DB1
-    end
+    DB[("PostgreSQL Primary")]
+    Cache[("Redis Cache")]
+    Outbox["Transactional Outbox"]
+    Queue["Message Queue"]
+    Worker["Background Workers"]
 
-    subgraph S2["② Payment Processing"]
-        direction LR
-        P1["Payment Service"] -->|"Create payment"| PG["External Payment Gateway"]
-        PG -->|"Payment result / Webhook"| WH["Webhook Handler"]
-        WH -->|"Verify signature + event ID"| V["Validate & Deduplicate Event"]
-        V -->|"Verified successful payment"| P2["Payment Service"]
-    end
+    Provider["External Telecom Recharge Provider"]
+    Notify["SMS / Push Notification"]
+    Recon["Reconciliation Service"]
 
-    subgraph S3["③ Confirm Booking Using ACID"]
-        direction LR
-        B2["Booking Service<br/>Recheck hold & payment"] -->|"BEGIN TRANSACTION"| DB2[("PostgreSQL")]
-        DB2 -->|"Lock booking / seat rows"| R["Validate hold, expiry,<br/>payment and seat ownership"]
-        R -->|"Valid: update booking"| C["CONFIRMED"]
-        C -->|"COMMIT"| DB2
-    end
+    Customer --> Gateway
+    Agent --> Gateway
+    Admin --> Gateway
 
-    subgraph S4["④ Ticket & Notification"]
-        direction LR
-        T["Ticket Service"] -->|"Create ticket once"| TD[("Ticket Records")]
-        TD -->|"Ticket ready"| N["Notification Service"]
-        N -->|"SMS / Email + E-ticket"| U2["👤 Passenger"]
-    end
+    Gateway --> Auth
+    Auth --> Transaction
+    Transaction --> Risk
+    Transaction --> Wallet
+    Transaction --> Recharge
 
-    H ==>|"Booking ID + hold expiry"| P1
-    P2 ==>|"Confirm booking request"| B2
-    DB2 ==>|"Confirmation committed"| T
+    Wallet <--> DB
+    Transaction <--> DB
+    Recharge <--> DB
 
-    WH -.->|"Duplicate event: no repeated processing"| V
-    R -.->|"Expired / invalid: reject or compensate"| X["Do not confirm<br/>Handle refund if charged"]
+    Gateway -. eligible cached reads .-> Cache
 
-    classDef user fill:#E1F5EE,stroke:#0F6E56,color:#04342C
-    classDef svc fill:#E6F1FB,stroke:#185FA5,color:#042C53
-    classDef ext fill:#FAEEDA,stroke:#854F0B,color:#412402
-    classDef db fill:#EEEDFE,stroke:#534AB7,color:#26215C
-    classDef error fill:#FCEBEB,stroke:#A32D2D,color:#501313
+    DB --> Outbox
+    Outbox --> Queue
+    Queue --> Worker
 
-    class U,U2 user
-    class W,G,B1,L,H,P1,V,P2,B2,R,C,T,N svc
-    class PG,WH ext
-    class DB1,DB2,TD db
-    class X error
+    Worker --> Provider
+    Provider --> Worker
+    Worker --> DB
+    Worker --> Notify
+    Worker --> Recon
+    Recon --> DB
 
 ```
 #### Step 1: Apps → API Gateway
