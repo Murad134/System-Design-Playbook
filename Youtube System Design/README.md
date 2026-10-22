@@ -124,32 +124,7 @@ The following is a practical reference stack. Equivalent technologies can be sub
 
 ## 4. High-Level Architecture
 
-### 4.1 Architecture Diagram
-
-```mermaid
-flowchart TD
-    U[User / Browser] --> FE[React or Next.js Frontend]
-    FE --> API[Node.js / Express API]
-
-    API --> AUTH[Authentication and Authorization]
-    API --> DB[(PostgreSQL)]
-    API --> CACHE[(Redis Cache)]
-    API --> OBJ[Object Storage]
-    API --> Q[Message Queue]
-
-    OBJ --> CDN[CDN]
-    CDN --> PLAYER[Video Player]
-
-    Q --> WORKER[Video Processing Worker]
-    WORKER --> FFMPEG[FFmpeg Transcoding]
-    FFMPEG --> OBJ
-    WORKER --> DB
-
-    API --> EVENTS[View and Interaction Events]
-    EVENTS --> Q
-```
-
-### End to End follow Architecture
+### 4.1 End to End follow Architecture
 ```mermaid
 flowchart TD
 
