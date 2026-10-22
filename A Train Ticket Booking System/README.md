@@ -144,57 +144,80 @@ the backend.
 flowchart TB
 
     subgraph S1["① Frontend Layer"]
+        direction TB
         U["👤 Passenger"] --> W["React / Next.js Web App"]
     end
 
     subgraph S2["② Backend Layer"]
-        direction LR
-        G["Express API / Auth"]
+        direction TB
+        G["Express API / Auth<br/>JWT Authentication"]
         B["Booking Service"]
+        H["Seat Availability + Row Lock"]
         P["Payment Service"]
-        C["Booking Confirmation"]
-        T["Ticket Service"]
+        WH["Webhook Handler<br/>Signature Verification"]
+        V["Validate + Deduplicate Event"]
+        C["Booking Confirmation<br/>Recheck Hold + Payment"]
+        X["Failure Handling<br/>Reject / Refund if Charged"]
+        T["Ticket Service<br/>Idempotent Ticket Creation"]
         N["Notification Service"]
 
         G --> B
-        G --> P
-        B --> C
+        B --> H
+        B --> P
         P --> C
-        C --> T
+        WH --> V
+        V --> P
+        C -->|Valid| T
+        C -->|Expired / Invalid| X
         T --> N
     end
 
     subgraph S3["③ Database Layer"]
-        direction LR
+        direction TB
         DB[("PostgreSQL")]
         TD[("Ticket Records")]
+        OB[("Outbox / Event Records")]
     end
 
     subgraph S4["④ External Services"]
-        direction LR
-        PG["Payment Gateway"]
+        direction TB
+        PG["External Payment Gateway"]
         MSG["SMS / Email Gateway"]
     end
 
     W -->|"HTTPS + JWT"| G
 
-    B <-->|"Seat Lock + Booking"| DB
-    C <-->|"Confirm Booking"| DB
-    T -->|"Save Ticket"| TD
+    H <-->|"Transaction + Seat Lock"| DB
+    B <-->|"Create PENDING Booking<br/>10-minute Hold"| DB
+    C <-->|"ACID Transaction<br/>Lock + Validate + Confirm"| DB
 
-    P <-->|"Payment + Webhook"| PG
-    N -->|"Send E-ticket / Notification"| MSG
+    P <-->|"Create Payment"| PG
+    PG -->|"Payment Webhook"| WH
+
+    V <-->|"Event ID / Processing Status"| DB
+
+    T -->|"Create Ticket Once"| TD
+    C -->|"Persist Confirmation Event"| OB
+    OB -->|"Ticket Generation Event"| T
+
+    N -->|"E-ticket / Notification"| MSG
     MSG --> U
+
+    X -->|"Release Hold / Record Failure"| DB
+    X -->|"Refund if Payment Captured"| P
 
     classDef user fill:#E1F5EE,stroke:#0F6E56,color:#04342C
     classDef svc fill:#E6F1FB,stroke:#185FA5,color:#042C53
     classDef db fill:#EEEDFE,stroke:#534AB7,color:#26215C
     classDef ext fill:#FAEEDA,stroke:#854F0B,color:#412402
+    classDef error fill:#FCEBEB,stroke:#A32D2D,color:#501313
 
     class U user
-    class W,G,B,P,C,T,N svc
-    class DB,TD db
+    class W,G,B,H,P,WH,V,C,T,N svc
+    class DB,TD,OB db
     class PG,MSG ext
+    class X error
+
 ```
 
 #### Quick Reference Table (Concepts & Their Purpose)
