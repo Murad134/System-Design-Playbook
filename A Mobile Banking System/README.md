@@ -13,10 +13,10 @@
 1. Problem Statement
 2. Requirements Analysis
 3. High-Level Architecture
-4. 15-Step System Design: Interview Presentation
-5. REST API Design
-6. Database Design
-7. ER Diagram
+4. REST API Design
+5. Database Design
+6. ER Diagram
+7. Edge Case Design
 8. Transaction Status Management
 9. Complete Send Money Flow
 10. Cash In and Cash Out Flow
@@ -336,489 +336,412 @@ The reconciliation results are stored in the database. If there is a mismatch, i
 **Design decision for the junior interview:** First, I will build a modular monolith with PostgreSQL. I will keep the wallet, ledger and internal transfer in the same database transaction boundary. As traffic and team size grow, I will separate services as needed.
 
 ---
+---
 
-# 4. 15-Step System Design: Interview Presentation Breakdown
+# 4. REST API Design
 
-## Step 1: Request Initiation — Customer Action
+## Step 1 — Convert Requirements into API Capabilities
 
-**What is happening:** The customer opens the app, sees the balance, and wants to Send Money ৳1,000 to someone else. They provide the receiver's mobile number, amount and required authorization.
+| User or system goal | API capability |
+|---|---|
+| Create an account | Register a user |
+| Prove phone ownership | Verify an OTP |
+| Start a session | Authenticate and issue credentials |
+| Authorize a sensitive action | Verify transaction PIN or another step-up factor |
+| Submit identity details | Create a KYC submission |
+| See own profile | Retrieve current user's profile |
+| See wallet information | Retrieve wallet summary |
+| Send money | Create a transfer |
+| Perform agent cash operations | Create cash-in or cash-out operation |
+| See transaction history | List transactions with pagination |
+| Check a transaction | Retrieve transaction details/status |
+| Request a refund | Start an authorized refund workflow |
+| Report a problem | Create a dispute |
+| Browse operators/packages | List supported operators and packages |
+| Recharge a phone | Create a recharge operation |
+| Receive provider updates | Process authenticated provider callbacks |
+| Manage agents and limits | Admin-only operations |
+| Review audit/reconciliation data | Restricted operational endpoints |
 
-**Why it is happening:** The user's intended financial operation must be captured.
+Questions to ask for every capability:
 
-**Benefit:** The frontend will create the request, but the backend will determine the final balance or fee.
+- Who is allowed to call it?
+- Does it read data or change state?
+- Which fields are required?
+- Can the request be retried?
+- Can it take time to complete?
+- What must be recorded for audit and reconciliation?
 
-## Step 2: Customer App → HTTPS → Express REST API
+---
 
-**What is happening:** The app will send the request to the API via HTTPS.
+## Step 2 — Identify Resources
+
+REST APIs generally expose **resources** using nouns.
+
+Core resources in this design:
+
+- `users` / `me`
+- `wallet`
+- `transfers`
+- `transactions`
+- `agents`
+- `cash-ins`
+- `cash-outs`
+- `operators`
+- `packages`
+- `recharges`
+- `package-purchases`
+- `refunds`
+- `disputes`
+- `kyc-submissions`
+- `admin/limits`
+- `admin/audit-logs`
+- `admin/reconciliation`
+
+Use action-oriented subpaths only when they represent a meaningful command or workflow, such as `/auth/login`, `/auth/verify-otp`, or `/transactions/{id}/refunds`.
+
+Avoid designing everything as a generic `/doAction` endpoint. Resource names make API contracts easier to understand and maintain.
+
+---
+
+## Step 3 — Choose HTTP Methods and Resource URLs
+
+| Method | Typical purpose | Example |
+|---|---|---|
+| `GET` | Read data; should not change business state | `GET /api/v1/wallet` |
+| `POST` | Create a resource or start an operation | `POST /api/v1/transfers` |
+| `PATCH` | Partially update a resource | `PATCH /api/v1/admin/accounts/{id}/status` |
+| `PUT` | Replace a resource representation when appropriate | Not required by the initial API list |
+| `DELETE` | Delete a resource where deletion is allowed | Usually unsuitable for posted financial records |
+
+Use `/api/v1` for versioning. Use consistent plural nouns for collections, and use path parameters to identify a specific resource.
+
+Financial records generally should not be deleted or silently overwritten. Correct mistakes through explicit reversal/refund workflows and preserve the audit trail.
+
+---
+
+## Step 4 — Complete Endpoint Catalog
+
+All endpoints below use the `/api/v1` prefix.
+
+### 4.1 Authentication and Account APIs
+
+| Method | Endpoint | Purpose | Access |
+|---|---|---|---|
+| `POST` | `/auth/register` | Register account | Public, rate-limited |
+| `POST` | `/auth/verify-otp` | Verify mobile ownership | OTP challenge / limited |
+| `POST` | `/auth/login` | Authenticate user | Public, rate-limited |
+| `POST` | `/auth/pin/verify` | Step-up authorization for sensitive operations | Authenticated user |
+| `POST` | `/kyc/submissions` | Submit KYC information | Authenticated user |
+| `GET` | `/me` | Retrieve own profile | Authenticated user |
+| `GET` | `/wallet` | Retrieve own wallet summary | Authenticated user |
+
+**Design decisions:**
+- Do not expose another user's profile or wallet just by accepting their user ID from the client.
+- Keep password and PIN verification separate. Never store plaintext passwords, PINs, or OTPs.
+- Define token expiry, refresh, logout/revocation, and device/session handling if the authentication design requires them. These are not included in the original endpoint list and may need additional endpoints.
+
+### 4.2 Financial APIs
+
+| Method | Endpoint | Purpose | Access |
+|---|---|---|---|
+| `POST` | `/transfers` | Send Money | Authenticated, eligible user |
+| `POST` | `/agents/cash-ins` | Cash In | Authorized customer/agent workflow |
+| `POST` | `/agents/cash-outs` | Cash Out | Authorized customer/agent workflow |
+| `GET` | `/wallet/transactions` | List own transaction history | Authenticated user |
+| `GET` | `/transactions/{id}` | Retrieve permitted transaction details/status | Owner or authorized role |
+| `POST` | `/transactions/{id}/refunds` | Request/execute an authorized refund workflow | Restricted permission |
+| `POST` | `/disputes` | Submit a dispute | Authenticated user |
+
+**Design decisions:**
+- A transfer should be represented as one logical operation with a stable transaction ID.
+- Cash In and Cash Out need explicit rules about who initiates the operation and how the agent is authenticated.
+- A customer refund request should not automatically mean that money is refunded. Authorization and business validation must happen server-side.
+- The API must verify that the caller is allowed to see the requested transaction.
+
+### 4.3 Recharge and Package APIs
+
+| Method | Endpoint | Purpose | Access |
+|---|---|---|---|
+| `GET` | `/operators` | List supported operators | Public or authenticated |
+| `GET` | `/operators/{id}/packages` | List packages for an operator | Public or authenticated |
+| `POST` | `/recharges` | Create mobile recharge | Authenticated, eligible user |
+| `GET` | `/recharges/{id}` | Retrieve recharge status | Owner or authorized role |
+| `POST` | `/package-purchases` | Purchase a package | Authenticated, eligible user |
+| `POST` | `/webhooks/recharge/{provider}` | Receive provider callback | Provider-authenticated only |
+
+**Design decisions:**
+- Public catalog reads may be accessible without login, depending on product policy.
+- The server must validate operator, mobile number, amount, package eligibility, and current pricing.
+- A provider webhook is not a normal user endpoint. Verify its signature/authentication, reject invalid or replayed callbacks, and process events idempotently.
+
+### 4.4 Admin and Agent Management APIs
+
+| Method | Endpoint | Purpose | Access |
+|---|---|---|---|
+| `POST` | `/admin/agents` | Register or approve an agent, as defined by workflow | Admin permission |
+| `PATCH` | `/admin/accounts/{id}/status` | Change account status | Admin permission |
+| `PATCH` | `/admin/limits/{id}` | Update transaction limits | Specific limits-management permission |
+| `GET` | `/admin/audit-logs` | Search audit records | Audit permission |
+| `GET` | `/admin/reconciliation` | View reconciliation status | Operations permission |
+
+Every admin action should use role-based access control (RBAC), least privilege, input validation, and audit logging. Consider separating agent creation from agent approval if those are different workflow steps.
+
+### Recommended additions to consider
+
+These were not included in the original list but may be needed in a complete API contract:
+
+- `POST /auth/logout` and/or refresh-token endpoint, depending on session design.
+- `GET /kyc/submissions/{id}` to check KYC status.
+- `GET /disputes/{id}` to retrieve a dispute's status.
+- Dedicated agent endpoints for viewing float/balance and initiating or confirming cash operations.
+- Admin endpoints for reviewing and resolving disputes/refunds.
+- A transaction receipt endpoint only if the product needs a separate representation; otherwise include receipt data in transaction details.
+
+Do not add endpoints just to make the list longer. Add them when a real user or operational workflow needs them.
+
+---
+
+##  Step 5 — Define Request and Response Contracts
+
+An endpoint should specify:
+
+- Required headers
+- Request body fields and types
+- Required vs optional fields
+- Validation rules
+- Success response
+- Pending response, if applicable
+- Error response
+- Authorization requirements
+
+
+
+
+
+
+# 5. Database Design
+
+## Step 1 — Understand Requirements
+
+| Requirement | Data to store |
+|---|---|
+| User registration | Account, phone, credential hash, status |
+| Wallet | Account owner, currency, balance, status |
+| Send money | Sender, receiver, amount, fee, status |
+| Cash in/out | Customer account, agent account, amount |
+| Mobile recharge | Operator, mobile number, amount, provider reference, status |
+| Package purchase | Operator, package, price |
+| Transaction history | Transactions and ledger entries |
+| KYC | Verification reference, status, metadata |
+| Refund | Original transaction, refund transaction, amount, status |
+| Fees and limits | Fee rules, KYC level, transaction limits |
+| Duplicate request protection | Idempotency key, request hash, result |
+| Notifications | User, channel, delivery status |
+| Admin audit | Actor, action, target, timestamp |
+| Background processing | Outbox event and publish status |
+| Disputes | Transaction, reason, resolution status |
+
+Questions to ask:
+
+- What information must be stored?
+- Which business rules must always hold?
+- Which records need an audit history?
+- What happens if a request is retried or a provider times out?
+- Which actions need to be atomic?
+
+---
+
+## Step 2 — Identify Entities
+
+The initial entity list:
+
+### Core financial entities
+
+- `users`
+- `wallet_accounts`
+- `transactions`
+- `ledger_entries`
+- `refunds`
+
+### Business entities
+
+- `kyc_records`
+- `agents`
+- `operators`
+- `packages`
+- `recharge_orders`
+
+### Security and reliability entities
+
+- `idempotency_keys`
+- `otp_verifications`
+- `outbox_events`
+- `audit_logs`
+
+### Supporting entities
+
+- `transaction_limits`
+- `fee_rules`
+- `disputes`
+- `notifications`
+
+Do not turn every noun into a table automatically. Create a separate entity when it has its own data, lifecycle, relationships, or business rules.
+
+---
+
+## Step 3 — Define Attributes
+
+### Example: `users`
+
+| Column | Type | Purpose |
+|---|---|---|
+| `id` | UUID, PK | Unique user ID |
+| `phone` | VARCHAR(20), UNIQUE | Mobile number |
+| `password_hash` | TEXT | Password hash, never plaintext |
+| `status` | VARCHAR | Account status |
+| `created_at` | TIMESTAMPTZ | Creation time |
+
+### Example: `wallet_accounts`
+
+| Column | Type | Purpose |
+|---|---|---|
+| `id` | UUID, PK | Wallet/account ID |
+| `owner_user_id` | UUID, FK, nullable for system accounts | Account owner |
+| `account_code` | VARCHAR, UNIQUE | Internal account reference |
+| `account_type` | VARCHAR | USER, AGENT, or SYSTEM |
+| `currency` | CHAR(3) | Currency, such as BDT |
+| `available_balance_minor` | BIGINT | Balance in minor units (paisa for BDT) |
+| `status` | VARCHAR | ACTIVE, FROZEN, or CLOSED |
+| `created_at` | TIMESTAMPTZ | Creation time |
+
+For each entity, ask:
+
+- What is its primary key?
+- Which fields are required?
+- Which values must be unique?
+- Which fields can change?
+- Does any information belong in a separate entity?
+
+---
+
+## Step 4 — Define Relationships
+
+| Relationship | Cardinality | Implementation |
+|---|---|---|
+| User → Wallet account | One-to-many across currencies/accounts, depending on business rules | `wallet_accounts.owner_user_id` |
+| User → KYC record | One-to-many if verification attempts/history are retained | `kyc_records.user_id` |
+| User → Agent profile | One-to-zero-or-one in this design | `agents.user_id UNIQUE` |
+| Operator → Package | One-to-many | `packages.operator_id` |
+| Transaction → Ledger entries | One-to-many | `ledger_entries.transaction_id` |
+| Wallet account → Ledger entries | One-to-many | `ledger_entries.account_id` |
+| Transaction → Recharge order | One-to-one in this design | `recharge_orders.transaction_id UNIQUE` |
+| Original transaction → Refunds | One-to-many if partial refunds are allowed | `refunds.original_transaction_id` |
+| Transaction → Dispute | One-to-many if multiple dispute records are allowed | `disputes.transaction_id` |
+
+A send-money transaction references the sender and receiver wallet accounts. A recharge may have no ordinary customer-to-customer receiver, so its transaction fields and business subtype must be designed to support that case.
+
+---
+
+## Step 5 — Normalization
+
+Normalization helps reduce unnecessary data duplication and update anomalies.
+
+Examples:
+
+- Keep operator details in `operators` instead of repeating operator names in every recharge record.
+- Keep package details in `packages` instead of duplicating package name, validity, and price in unrelated tables.
+- Store identity verification details in `kyc_records` rather than mixing the whole KYC lifecycle into `users`.
+
+### Normalization checklist
+
+- **1NF:** Each field stores a single value; do not place multiple passengers, phone numbers, or package IDs in one ordinary column.
+- **2NF:** If a table uses a composite key, every non-key attribute must depend on the whole key, not just part of it.
+- **3NF:** Non-key attributes should not depend unnecessarily on other non-key attributes.
+
+Denormalization may be appropriate for measured performance needs, but it adds consistency and maintenance costs. Avoid denormalizing before real query requirements justify it.
+
+---
+
+## Step 6 — Data Integrity and Constraints
+
+| Business rule | Possible database protection |
+|---|---|
+| Every row has a unique identity | `PRIMARY KEY` |
+| Phone number must be unique | `UNIQUE` |
+| A wallet balance cannot be negative | `CHECK (available_balance_minor >= 0)` |
+| Ledger entry must reference a transaction and account | `FOREIGN KEY` |
+| Transaction amount must be positive | `CHECK (amount_minor > 0)` |
+| One logical request key must not be processed twice within its scope | Scoped `UNIQUE` idempotency key |
+| A refund operation must not be duplicated | Unique refund operation key |
+
+Constraints do not replace application authorization or transaction logic. A balance `CHECK` alone cannot prevent two concurrent requests from spending the same funds.
+
+For posted ledger entries, use database permissions and/or triggers to prevent updates and deletes. Corrections should be represented by reversal entries.
+
+---
+
+## Step 7 — Transactions and Concurrency
+
+### Example: concurrent send-money requests
+
+A wallet has ৳1,000. Two requests arrive simultaneously:
+
+- Request A: send ৳700
+- Request B: send ৳600
+
+The database must not allow both to debit the same original balance.
+
+A safe implementation should:
+
+1. Begin a database transaction.
+2. Validate the request, account status, limits, and idempotency key.
+3. Lock or atomically update the relevant wallet row(s), using a consistent lock order when multiple accounts are involved.
+4. Ensure sufficient balance at the point of debit.
+5. Record the transaction and corresponding ledger entries.
+6. Update balances consistently.
+7. Commit everything together, or roll everything back.
+
+The exact implementation depends on the isolation level, lock strategy, and schema. It must be tested under concurrent load.
+
+### External recharge
+
+A provider timeout does not prove that the recharge failed.
+
+- Store the operation and provider reference.
+- Use idempotency keys to prevent duplicate logical requests.
+- Keep the result `PENDING` or `UNKNOWN` until verified.
+- Check provider status before retrying an uncertain operation.
+- Reconcile local records against provider records.
+
+Do not keep a database transaction open while waiting for an external network call.
+
+---
+
+## 10. Step 8 — Indexing
+
+First identify common queries, then create indexes to support them.
+
+| Query pattern | Candidate index |
+|---|---|
+| User's transaction history | `(sender_account_id, created_at DESC)` |
+| Receiver's transaction history | `(receiver_account_id, created_at DESC)` |
+| Wallet ledger history | `(account_id, created_at DESC)` |
+| Find pending recharge orders | Partial index on pending states |
+| Find unpublished outbox events | Partial index on `status = 'PENDING'` |
 
 Example:
 
-```http
-POST /api/v1/transfers
-Authorization: Bearer <access-token>
-Idempotency-Key: 5ef0c8e8-unique-operation
-Content-Type: application/json
-```
-
-```json
-{
-  "receiver": "017XXXXXXXX",
-  "amountMinor": 100000
-}
-```
-
-Here `amountMinor: 100000` means ৳1,000, if the API uses paisa as the minor unit of BDT.
-
-**Why it is happening:** HTTPS encrypts communication, and the Idempotency-Key helps identify retries of the same operation.
-
-**Benefit:** The risk of duplicate transfers from double-click or network retry is reduced.
-
-## Step 3: Authentication, PIN Authorization & Validation
-
-**What is happening:** Middleware will verify:
-
-- Whether the access token is valid.
-- Whether the user account is active.
-- Whether KYC and transaction permission are correct.
-- Whether PIN authorization or the required step-up verification has succeeded.
-- Whether the amount is valid and within the permitted limit.
-- Whether the receiver account can accept the transaction.
-
-**Why it is happening:** So that unauthorized or invalid requests do not enter financial processing.
-
-**Benefit:** Security, compliance and business rules can be enforced right from the start.
-
-## Step 4: Transaction Service — Idempotency Check
-
-**What is happening:** The server will check whether the same user/scope's Idempotency-Key has been used before.
-
-- New key: the request will be processed.
-- Same key, same payload: the previous result or current status will be returned.
-- Same key, different payload: it will be rejected as a conflict.
-- If the previous request is still processing, the status will be returned without creating a duplicate operation.
-
-**Why it is happening:** Retry is a normal event when the client loses the response.
-
-**Benefit:** The same logical operation will not create a financial effect more than once.
-
-## Step 5: Begin PostgreSQL Transaction
-
-**What is happening:** A database transaction will begin for internal Send Money.
-
 ```sql
-BEGIN;
+CREATE INDEX idx_transactions_sender_history
+ON transactions (sender_account_id, created_at DESC);
 ```
 
-Then the sender's and receiver's wallet records will be locked as needed.
-
-**Why it is happening:** Debit, credit, transaction record and ledger entries must be committed together.
-
-**Benefit:** If an error occurs at any step, the entire internal transfer can be rolled back.
-
-## Step 6: Concurrency Control & Balance Validation
-
-**What is happening:** The wallet record will be locked/guarded using PostgreSQL's `SELECT ... FOR UPDATE` or a conditional update.
-
-Then it will be verified:
-
-- Whether the sender's account is active.
-- Whether the available balance is sufficient.
-- Whether the total debit of amount + fee is permitted.
-- Whether the daily/monthly limit has been exceeded.
-
-**Why it is happening:** When two requests come at the same time from the same wallet, overspending using a stale balance must be prevented.
-
-**Benefit:** The risk of the same money being spent in two transactions can be prevented.
-
-## Step 7: Debit, Credit & Ledger Entries
-
-**What is happening:** If all validations succeed, within the same database transaction:
-
-1. Debit amount + fee from the sender wallet.
-2. Credit the amount to the receiver wallet.
-3. Create the transaction record.
-4. Create balanced ledger entries.
-5. Insert the required outbox event.
-
-**Why it is happening:** The financial changes of the transfer must be committed together.
-
-**Benefit:** A partial transfer—where the sender's debit succeeds but the receiver's credit fails—will not become permanent.
-
-## Step 8: PostgreSQL Commit & Response
-
-**What is happening:** If all updates and constraint checks succeed, `COMMIT` will happen. Then the transaction ID and status will be returned as the response.
-
-**Why it is happening:** The committed financial record is the authoritative result of the operation.
-
-**Benefit:** Even if the response is lost after commit, the previous result can be obtained with the same idempotency key.
-
-## Step 9: Transactional Outbox & Notification
-
-**What is happening:** In the same database transaction as the financial transaction, an `outbox_events` record will be inserted. The worker will later publish the event and send SMS or push notification.
-
-**Why it is happening:** Even if the database commit succeeds, the message broker or notification service may be unavailable.
-
-**Benefit:** A successful transfer will not be cancelled due to notification failure; the event can be retried.
-
-## Step 10: Recharge/Package Request Initiation
-
-**What is happening:** When a customer does a recharge or package purchase, the backend will verify operator, number, package, price and eligibility and create an order.
-
-After deciding the policy for reserving/debiting funds, the order will be kept in `PENDING` or `PROCESSING` state.
-
-**Why it is happening:** Internal wallet debit and external operator activation happen in two separate systems.
-
-**Benefit:** The financial transaction and provider operation are managed in separate lifecycles.
-
-## Step 11: Outbox Worker → External Provider
-
-**What is happening:** The worker will send a recharge/package activation request to the provider API. If the provider reference and idempotency support exist, it will be used.
-
-**Why it is happening:** The PostgreSQL transaction should not be kept open during an external network call.
-
-**Benefit:** The database connection is not held for a long time and the worker can retry independently.
-
-## Step 12: Provider Callback / Webhook
-
-**What is happening:** When the provider sends a success/failure callback, the server will verify authenticity/signature, provider reference, amount, number and status.
-
-If the same callback comes more than once, a unique event/reference and an idempotent handler will be used.
-
-**Why it is happening:** Duplicate callbacks may come due to provider retry or network issues.
-
-**Benefit:** The risk of the same recharge being completed or refunded twice is reduced.
-
-## Step 13: Finalize Recharge or Package Purchase
-
-**What is happening:**
-
-- If success is verified, the order becomes `SUCCESS`.
-- If terminal failure is confirmed, the refund/release workflow runs.
-- If the outcome is unknown, it is kept as `PENDING/UNKNOWN` and provider status query and reconciliation are done.
-
-**Why it is happening:** A timeout does not necessarily mean recharge failure.
-
-**Benefit:** Even if the provider operation succeeded but the internal response was lost, wrong refund or duplicate recharge can be avoided.
-
-## Step 14: Cash In/Out, Reversal & Reconciliation
-
-**What is happening:** In Cash In/Out, agent authorization, float balance, customer eligibility and physical cash handover policy will be verified. For refund/reversal, a new transaction and ledger entries will be created.
-
-The reconciliation worker will match internal records with provider reports and settlement records.
-
-**Why it is happening:** Digital balance and actual cash movement or external provider outcome may not always be confirmed at the same moment.
-
-**Benefit:** Mismatches can be identified, audited and recovered in a controlled manner.
-
-## Step 15: Monitoring, Receipt & Customer Status
-
-**What is happening:** The app will show transaction history/status. The backend will monitor failed transactions, stuck orders, duplicate events and database issues using metrics, structured logs, tracing and alerts.
-
-**Why it is happening:** In a financial system, not only the success path but also failure recovery is important.
-
-**Benefit:** The customer support and engineering team can quickly find the cause of problems.
+Indexes speed up suitable reads but use storage and add overhead to inserts and updates. Validate indexes with real query plans and workload measurements.
 
 ---
 
-# 5. REST API Design
-
-All APIs will be versioned: `/api/v1/...`. Financial write requests will have authentication, validation, authorization and, as needed, an Idempotency-Key.
-
-## 5.1 Authentication & Account APIs
-
-| Method | Endpoint | Purpose |
-|---|---|---|
-| POST | `/api/v1/auth/register` | Registration |
-| POST | `/api/v1/auth/verify-otp` | Mobile verification |
-| POST | `/api/v1/auth/login` | Login |
-| POST | `/api/v1/auth/pin/verify` | Sensitive operation authorization |
-| POST | `/api/v1/kyc/submissions` | KYC submission |
-| GET | `/api/v1/me` | Own profile |
-| GET | `/api/v1/wallet` | Wallet balance and summary |
-
-## 5.2 Financial APIs
-
-| Method | Endpoint | Purpose |
-|---|---|---|
-| POST | `/api/v1/transfers` | Send Money |
-| POST | `/api/v1/agents/cash-ins` | Cash In |
-| POST | `/api/v1/agents/cash-outs` | Cash Out |
-| GET | `/api/v1/wallet/transactions` | Paginated transaction history |
-| GET | `/api/v1/transactions/:id` | Transaction status |
-| POST | `/api/v1/transactions/:id/refunds` | Authorized refund workflow |
-| POST | `/api/v1/disputes` | Dispute submission |
-
-## 5.3 Recharge & Package APIs
-
-| Method | Endpoint | Purpose |
-|---|---|---|
-| GET | `/api/v1/operators` | Supported operators |
-| GET | `/api/v1/operators/:id/packages` | Available packages |
-| POST | `/api/v1/recharges` | Mobile recharge |
-| GET | `/api/v1/recharges/:id` | Recharge status |
-| POST | `/api/v1/package-purchases` | Package purchase |
-| POST | `/api/v1/webhooks/recharge/:provider` | Provider callback |
-
-## 5.4 Admin & Agent APIs
-
-| Method | Endpoint | Purpose |
-|---|---|---|
-| POST | `/api/v1/admin/agents` | Agent approval/registration |
-| PATCH | `/api/v1/admin/accounts/:id/status` | Account status management |
-| PATCH | `/api/v1/admin/limits/:id` | Limits management |
-| GET | `/api/v1/admin/audit-logs` | Audit review |
-| GET | `/api/v1/admin/reconciliation` | Reconciliation status |
-
-Admin APIs must have Role-Based Access Control (RBAC), least privilege and audit logging.
-
-## 5.5 Send Money Request Example
-
-```http
-POST /api/v1/transfers
-Authorization: Bearer <access-token>
-Idempotency-Key: 5ef0c8e8-unique-operation
-Content-Type: application/json
-```
-
-```json
-{
-  "receiver": "017XXXXXXXX",
-  "amountMinor": 100000
-}
-```
-
-Suppose the fee determined by the server is ৳5.
-
-```json
-{
-  "transactionId": "txn_01JXYZ",
-  "type": "SEND_MONEY",
-  "amountMinor": 100000,
-  "feeMinor": 500,
-  "status": "SUCCESS",
-  "currency": "BDT"
-}
-```
-
-Here the sender's total debit is ৳1,005 and the receiver will get ৳1,000.
-
-**Important:** The fee cannot be trusted from the client; it must be determined according to the backend's fee policy.
-
-## 5.6 Error Handling
-
-| HTTP Status | Example |
-|---|---|
-| 400 | Invalid request/amount |
-| 401 | Invalid or missing authentication |
-| 403 | KYC/account/permission restriction |
-| 404 | Receiver or transaction not found |
-| 409 | Insufficient balance or idempotency conflict |
-| 422 | Operation not acceptable per business rules |
-| 429 | Rate limit exceeded |
-| 202 | External operation pending |
-| 503 | Temporary service unavailable |
-
-The response should have a machine-readable error code, such as `INSUFFICIENT_FUNDS`, `ACCOUNT_BLOCKED`, `DUPLICATE_REQUEST`.
-
----
-
-# 6. Database Design
-
-## 6.1 Main Tables
-
-### 1. `users`
-
-| Column | Type | Purpose |
-|---|---|---|
-| id | UUID, PK | User ID |
-| phone | VARCHAR, UNIQUE | Mobile number |
-| password_hash | TEXT | Secure credential hash |
-| status | VARCHAR/ENUM | ACTIVE/BLOCKED |
-| created_at | TIMESTAMPTZ | Account creation |
-
-users — Stores the user's account information, mobile number, secure password hash and account status.
-
-### 2. `wallet_accounts`
-
-| Column | Type | Purpose |
-|---|---|---|
-| id | UUID, PK | Wallet ID |
-| user_id | UUID, FK | Wallet owner |
-| currency | CHAR(3) | BDT |
-| available_balance_minor | BIGINT | Available balance in paisa |
-| status | VARCHAR/ENUM | ACTIVE/FROZEN |
-| created_at | TIMESTAMPTZ | Creation time |
-
-Constraint:
-
-```sql
-UNIQUE (user_id, currency)
-CHECK (available_balance_minor >= 0)
-```
-
-In `available_balance_minor`, money will be kept as an integer minor unit; floating-point amounts will not be used.
-
-wallet_accounts — Manages the user's wallet, currency, available balance and wallet status. Balance is kept in integer minor units.
-
-
-### 3. `transactions`
-
-| Column | Type | Purpose |
-|---|---|---|
-| id | UUID, PK | Transaction ID |
-| type | VARCHAR/ENUM | SEND_MONEY/CASH_IN/RECHARGE |
-| status | VARCHAR/ENUM | Lifecycle status |
-| sender_account_id | UUID, FK, nullable | Source account |
-| receiver_account_id | UUID, FK, nullable | Destination account |
-| amount_minor | BIGINT | Amount |
-| fee_minor | BIGINT | Fee |
-| currency | CHAR(3) | BDT |
-| idempotency_key | VARCHAR | Operation reference |
-| created_at | TIMESTAMPTZ | Creation time |
-
-transactions — Stores the amount, sender, receiver and status of financial transactions like money transfer, cash-in and mobile recharge.
-
-
-### 4. `ledger_entries`
-
-| Column | Type | Purpose |
-|---|---|---|
-| id | UUID, PK | Ledger entry ID |
-| transaction_id | UUID, FK | Business transaction |
-| account_id | UUID, FK | Financial account |
-| direction | VARCHAR | DEBIT/CREDIT |
-| amount_minor | BIGINT | Entry amount |
-| created_at | TIMESTAMPTZ | Entry time |
-
-The ledger will be append-only. Financial history cannot be changed by updating/deleting old entries.
-
-ledger_entries — Keeps the Debit/Credit entries and financial history of every financial transaction. It is append-only, so old entries cannot be changed or deleted.
-
-
-### 5. `kyc_records`
-
-Will keep the user's KYC status, verification reference and verification metadata.
-
-kyc_records — Stores the user's identity verification (KYC) status, verification reference and metadata.
-
-
-### 6. `agents`
-
-Will keep the agent's user reference, agent code, approval status and operational details.
-
-agents — Keeps the agent's user reference, unique agent code, approval status and operational information.
-
-
-### 7. `recharge_orders`
-
-- Transaction ID
-- Operator
-- Mobile number reference
-- Amount/package ID
-- Provider reference
-- Order status
-- Retry/reconciliation metadata
-
-recharge_orders — Stores the mobile recharge's operator, mobile number reference, amount/package, provider reference and recharge status.
-
-
-### 8. `packages`
-
-- Operator ID
-- Provider package ID
-- Package name/type
-- Price
-- Validity
-- Eligibility
-- Active status
-
-packages — Manages the mobile operator's recharge packages, price, validity, eligibility and active status.
-
-### 9. `idempotency_keys`
-
-- Request scope
-- Idempotency key
-- Request payload hash
-- Transaction reference
-- Processing/result status
-- Stored response reference
-
-idempotency_keys — To prevent duplicate financial transactions from being created even when the same request is retried, it keeps the request key, payload hash and result reference.
-
-### 10. `refunds`
-
-Will keep the original transaction ID, refund operation ID, amount, reason, status and provider reference.
-
-refunds — Stores the refund amount, reason, status and provider reference against the original transaction.
-
-
-### 11. `outbox_events`
-
-Will keep the event created atomically with the financial transaction and its publish status.
-
-outbox_events — Stores the event created in the same database transaction as the financial transaction, so that it can be published reliably later.
-
-
-### 12. `audit_logs`
-
-Will keep administrative action, actor, timestamp, target, reason and correlation reference. PIN, OTP or access token must not be logged.
-
-audit_logs — Keeps the audit history of the admin's action, actor, timestamp, target and reason. PIN, OTP or access token must not be logged.
-
-## 6.2 Important Database Constraints
-
-- `users.phone` will be unique.
-- `(user_id, currency)` will be unique for the wallet.
-- Transactions and ledger entries will have foreign keys.
-- `(scope, idempotency_key)` will be unique.
-- The provider's unique transaction/event reference will prevent duplicate processing.
-- Amount will be positive and fee will be non-negative.
-- If overdraft is prohibited by account policy, balance cannot become negative.
-- The same refund operation of the original transaction cannot be duplicated.
-- Ledger entries cannot be updated/deleted with normal application permission.
-
-## 6.3 Sample PostgreSQL Schema
-
-```sql
-CREATE TABLE wallet_accounts (
-    id UUID PRIMARY KEY,
-    user_id UUID NOT NULL REFERENCES users(id),
-    currency CHAR(3) NOT NULL DEFAULT 'BDT',
-    available_balance_minor BIGINT NOT NULL DEFAULT 0,
-    status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    UNIQUE (user_id, currency),
-    CHECK (available_balance_minor >= 0)
-);
-
-CREATE TABLE transactions (
-    id UUID PRIMARY KEY,
-    type VARCHAR(30) NOT NULL,
-    status VARCHAR(30) NOT NULL,
-    amount_minor BIGINT NOT NULL CHECK (amount_minor > 0),
-    fee_minor BIGINT NOT NULL DEFAULT 0
-        CHECK (fee_minor >= 0),
-    currency CHAR(3) NOT NULL DEFAULT 'BDT',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE ledger_entries (
-    id UUID PRIMARY KEY,
-    transaction_id UUID NOT NULL REFERENCES transactions(id),
-    account_id UUID NOT NULL REFERENCES wallet_accounts(id),
-    direction VARCHAR(6) NOT NULL
-        CHECK (direction IN ('DEBIT', 'CREDIT')),
-    amount_minor BIGINT NOT NULL CHECK (amount_minor > 0),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-```
-
-This is a **simplified schema**, not a complete production-ready schema. In a production implementation, sender/receiver references, accounting account types, idempotency, refund links, provider references and ledger invariants at the transaction boundary must be enforced.
-
----
-
-# 7. ER Diagram
+# 6. ER Diagram
 
 ```mermaid
 erDiagram
@@ -841,6 +764,433 @@ erDiagram
 **Explanation:** `transactions` is the business event, and `ledger_entries` are the accounting records of that event. A transaction can have multiple debit/credit entries. The external provider reference of a recharge or package purchase will be stored separately.
 
 ---
+#  Edge Case Design
+
+## 1. What Is an Edge Case?
+
+An **edge case** is an unusual, boundary, concurrent, or failure situation that can cause a system to behave incorrectly if it has not been designed for it.
+
+Examples in BanglaPay:
+
+- The user tries to send ৳0 or a negative amount.
+- Two transfers attempt to spend the same wallet balance simultaneously.
+- The server processes a transfer, but the client times out before receiving the response.
+- A recharge provider succeeds, but its response never reaches BanglaPay.
+- The same webhook arrives several times.
+- A refund request is repeated.
+- The database commits, but notification delivery fails.
+
+Edge-case design is not only about invalid input. It also covers concurrency, partial failure, retries, security, state transitions, and recovery.
+
+---
+
+## 2. The Edge-Case Thinking Framework
+
+For every API or business operation, ask these questions:
+
+1. **Input boundary:** What if the input is missing, malformed, too small, too large, or duplicated?
+2. **Identity and permission:** What if the caller is unauthenticated, unauthorized, blocked, or trying to access another user's data?
+3. **State:** What if the resource is already completed, cancelled, expired, frozen, or in an unexpected state?
+4. **Concurrency:** What if two requests happen at the same time?
+5. **Network:** What if the client, server, database, or provider times out?
+6. **Partial failure:** What if one step succeeds but a later step fails?
+7. **Retry:** What if the same request is sent again?
+8. **Data integrity:** What if a balance, ledger entry, or provider record does not match?
+9. **Recovery:** How will the system detect, reconcile, and correct the situation?
+10. **Observability:** What should be logged, alerted, and traceable without exposing secrets?
+
+A useful design template:
+
+| Question | Decision to document |
+|---|---|
+| What can go wrong? | Edge case |
+| What is the impact? | Financial, security, user experience, or availability |
+| What should happen? | Expected behavior |
+| Which layer enforces it? | API, application, database, provider integration, operations |
+| How can we verify it? | Test, metric, alert, reconciliation |
+
+---
+
+## Step 1 — Find Boundaries and Failure Points
+
+### A. Numeric boundaries
+
+For every amount, limit, count, and time field, ask:
+
+- What happens at zero?
+- What happens below zero?
+- What happens at the minimum allowed value?
+- What happens at the maximum allowed value?
+- What happens one unit below or above the limit?
+- Can the value overflow the chosen database or programming-language type?
+- Are currency and minor-unit conversion handled correctly?
+
+For BDT, if the API uses paisa as the minor unit, ৳100.00 is `10000` minor units. Use integer arithmetic for money; do not use binary floating-point values for financial amounts.
+
+### B. State boundaries
+
+For each operation, test:
+
+- Request before the operation starts.
+- Request while it is processing.
+- Request after success.
+- Request after failure.
+- Request after expiry or cancellation.
+- Duplicate request after the state has changed.
+
+### C. Timing boundaries
+
+Test:
+
+- Two requests at almost the same time.
+- Request arrives just before a limit reset or expiry.
+- Client times out while the server continues processing.
+- Provider callback arrives before the synchronous provider response.
+- A callback arrives much later than expected.
+- A worker crashes after processing but before marking a job complete.
+
+### D. Trust boundaries
+
+Test:
+
+- Missing or expired access token.
+- User submits another user's resource ID.
+- Customer attempts an admin-only action.
+- Agent attempts an operation for an unauthorized account.
+- Provider sends an invalid signature or repeated callback.
+- Request payload contains fields the client should not control, such as fee, balance, or role.
+
+---
+
+## Step 2 — Classify Edge Cases
+
+Use these categories so the review is systematic.
+
+| Category | Example | Main design control |
+|---|---|---|
+| Input validation | Amount is zero or malformed | Schema and business validation |
+| Boundary values | Amount exceeds daily limit by one paisa | Limit rules and boundary tests |
+| Authentication | Expired token | Authentication middleware |
+| Authorization | Accessing another user's wallet | Ownership and permission checks |
+| Concurrency | Two transfers spend the same balance | Atomic updates/locks and transactions |
+| Idempotency | Same transfer request retried | Idempotency key and request hash |
+| Network failure | Client times out after server commits | Stable operation ID and retry contract |
+| External provider | Recharge outcome unknown | Pending/unknown state and reconciliation |
+| Database failure | Error before commit | Rollback and retry policy |
+| Partial failure | Transfer commits but SMS fails | Outbox and independent notification retry |
+| State transition | Refund requested twice | State validation and unique operation key |
+| Data mismatch | Local recharge differs from provider record | Reconciliation and operational alert |
+| Security abuse | OTP brute-force attempts | Rate limits, attempt counters, monitoring |
+| Operational failure | Worker processes one event repeatedly | Idempotent consumer and durable queue/outbox |
+
+---
+
+## Step 3 — Edge-Case Matrix
+
+The table below maps realistic cases to expected behavior. Exact HTTP codes and product policy should be standardized across the API.
+
+| # | Edge case | Expected behavior | Main control |
+|---:|---|---|---|
+| 1 | Amount is missing, zero, negative, or non-integer | Reject without financial side effects | Request validation |
+| 2 | Amount is above a per-transaction limit | Reject with a stable limit error | Business rules |
+| 3 | Amount is exactly at the permitted limit | Accept if all other checks pass | Boundary test |
+| 4 | Amount exceeds the limit by one minor unit | Reject | Boundary test |
+| 5 | Sender and receiver are the same account | Reject transfer | Business validation |
+| 6 | Sender has insufficient balance | Do not debit; return a stable error | Atomic balance check |
+| 7 | Two requests concurrently spend the same funds | At most the amount safely supported by the balance succeeds | Row lock/conditional update |
+| 8 | Account becomes frozen during a transfer attempt | Enforce status at the authoritative transaction point | Transaction/locking policy |
+| 9 | Client retries after its request times out | Return existing operation/result; do not create another transfer | Idempotency |
+| 10 | Same idempotency key with a different payload | Reject as a conflict | Payload hash |
+| 11 | Server commits but response is lost | Retry retrieves the committed operation | Durable idempotency record |
+| 12 | Database fails before commit | No partial financial changes remain | Database transaction |
+| 13 | Notification service is unavailable | Financial result remains committed; retry notification separately | Transactional outbox |
+| 14 | Recharge provider times out | Mark outcome pending/unknown and verify before retrying | Provider query/reconciliation |
+| 15 | Provider sends duplicate webhook | Process the financial effect once | Event/provider reference deduplication |
+| 16 | Provider webhook has invalid signature | Reject and log safely | Signature verification |
+| 17 | Provider reports success after local timeout | Apply verified result exactly once | State transition + idempotent processing |
+| 18 | Provider result conflicts with local status | Do not silently overwrite; reconcile and alert | Reconciliation workflow |
+| 19 | Refund request is repeated | Return existing refund or reject duplicate; never refund twice | Unique refund key/idempotency |
+| 20 | Refund total exceeds original eligible amount | Reject or hold for review according to policy | Locked aggregate check/controlled workflow |
+| 21 | User exceeds OTP/PIN attempt threshold | Throttle or temporarily block according to policy | Rate limiting and attempt tracking |
+| 22 | Transaction ID belongs to another user | Do not disclose protected transaction details | Object-level authorization |
+| 23 | Transaction history is very large | Return bounded page with stable ordering | Cursor pagination |
+| 24 | Client submits its own fee or balance | Ignore/reject client-controlled financial fields; calculate server-side | Allowlisted request schema |
+| 25 | Ledger entries do not balance | Do not mark operation completed; trigger integrity alert/recovery | Atomic posting and ledger validation |
+| 26 | Daily-limit requests race concurrently | Enforce the limit atomically, not using stale pre-checks only | Serialized/atomic limit accounting |
+| 27 | Duplicate background job is delivered | Do not repeat financial side effects | Idempotent worker |
+| 28 | User closes app while transfer is processing | Operation continues independently; user can query status | Durable operation resource |
+| 29 | Phone number changes during an operation | Use a stable account ID internally and re-check authorization | Identity model |
+| 30 | Clock skew affects expiry/signature checks | Use a documented trusted-time policy and tolerance | Time validation and monitoring |
+
+### How to use this matrix
+
+For every row, add:
+- The exact expected API response.
+- The transaction/state transition.
+- The database constraint or locking strategy.
+- The test case.
+- The monitoring or recovery action.
+
+---
+
+## Step 4 — API Contract Decisions
+
+### Example A: Insufficient funds
+
+Request:
+
+```http
+POST /api/v1/transfers
+Authorization: Bearer <access-token>
+Idempotency-Key: transfer-unique-key
+Content-Type: application/json
+```
+
+```json
+{
+  "receiver": "017XXXXXXXX",
+  "amountMinor": 100000
+}
+```
+
+Example error response:
+
+```json
+{
+  "error": {
+    "code": "INSUFFICIENT_FUNDS",
+    "message": "The available balance is not sufficient for this transfer.",
+    "requestId": "req_01JXYZ"
+  }
+}
+```
+
+The server must not create a successful transfer or debit funds. Whether a failed attempt is recorded for audit/idempotency purposes should be explicitly defined.
+
+### Example B: Request times out but the transfer may have completed
+
+The client must not assume a timeout means failure. It should retry with the **same idempotency key** or query the known operation ID.
+
+The server should return the original result or current status instead of creating a second transfer.
+
+### Example C: Recharge is still being verified
+
+```json
+{
+  "rechargeId": "rch_01JXYZ",
+  "transactionId": "txn_01JXYZ",
+  "status": "PENDING",
+  "message": "The provider result is being verified."
+}
+```
+
+A pending response must not be described as success or failure until the outcome is known.
+
+### Contract rules
+
+- Use stable machine-readable error codes.
+- Document which failures are safe to retry.
+- Document whether a request may return `202 Accepted`.
+- Return a stable operation/transaction ID for long-running work.
+- Avoid exposing internal database errors or provider credentials.
+- Do not return another user's resource details.
+
+---
+
+## Step 5 — Database and Concurrency Safety
+
+### Case: Two simultaneous transfers
+
+Assume the wallet balance is ৳1,000:
+
+- Request A wants to send ৳700.
+- Request B wants to send ৳600.
+
+A naive implementation may let both requests read ৳1,000 before either updates the balance. This is unsafe.
+
+A safer approach is to perform the balance check and debit as an atomic database operation within the transfer transaction. For example, in PostgreSQL:
+
+```sql
+UPDATE wallet_accounts
+SET available_balance_minor = available_balance_minor - $1
+WHERE id = $2
+  AND status = 'ACTIVE'
+  AND available_balance_minor >= $1
+RETURNING available_balance_minor;
+```
+
+If no row is returned, the debit was not made. This statement is only one part of the complete transfer workflow: sender debit, receiver credit, transaction record, ledger entries, and outbox event must be handled consistently in one database transaction where appropriate.
+
+For transfers involving multiple accounts, use a consistent lock order to reduce deadlock risk and retry serialization/deadlock failures only through a safe idempotent workflow.
+
+### Important database principles
+
+- Use foreign keys for references.
+- Use `CHECK` constraints for row-level rules.
+- Use unique constraints for identifiers and deduplication keys.
+- Use transactions for related financial changes.
+- Do not assume a row-level `CHECK` prevents concurrent overspending.
+- Do not assume a database transaction alone protects against duplicate external provider operations.
+- Posted ledger entries should be immutable; corrections should use reversal entries.
+- Cross-row rules such as balanced ledger entries or total refunds require controlled transaction logic, a procedure/trigger strategy, or another explicit enforcement mechanism.
+
+---
+
+## Step 6 — External Provider Failure Design
+
+External systems cannot participate in BanglaPay's local PostgreSQL transaction. Therefore, treat provider outcomes as a separate stateful workflow.
+
+### Possible provider outcomes
+
+| Outcome | Interpretation | Action |
+|---|---|---|
+| Explicit success | Provider confirms success | Record verified success once |
+| Explicit failure | Provider confirms failure | Record verified failure and execute the defined financial recovery |
+| Timeout / connection loss | Outcome is unknown | Keep pending/unknown; query provider or reconcile |
+| Invalid response | Outcome cannot be trusted | Do not mark success; investigate/retry status verification |
+| Duplicate callback | Event may have been delivered again | Deduplicate and apply transition once |
+| Contradictory status | Local/provider state mismatch | Preserve evidence, reconcile, alert |
+
+### Recommended workflow
+
+1. Validate the request and check idempotency.
+2. Create a durable local operation in a pending state.
+3. Commit local state before making the external call.
+4. Send the provider request outside an open database transaction.
+5. Persist provider references and response details needed for reconciliation, avoiding unnecessary sensitive data.
+6. If uncertain, query provider status rather than blindly submitting a new operation.
+7. Process callbacks idempotently.
+8. Reconcile stale pending operations and mismatches.
+
+Define exactly when the customer's wallet is debited, reserved, or refunded. This policy affects ledger design, API status, and user-visible messaging.
+
+---
+
+## Step 7 — Security and Abuse Cases
+
+| Risk | Protection |
+|---|---|
+| OTP brute force | Attempt counters, rate limits, expiry, monitoring |
+| PIN guessing | Secure PIN hash, throttling, step-up/lockout policy |
+| Account enumeration | Carefully designed authentication error messages |
+| Broken object-level authorization | Verify resource ownership/permission for every request |
+| Client tampers with fee or amount | Server-side fee calculation and strict request schema |
+| Replay of a valid webhook | Signature/timestamp checks and deduplication |
+| Repeated refund attempts | Authorization, idempotency, original-transaction checks |
+| Admin privilege abuse | Fine-grained RBAC, least privilege, audit trail |
+| Sensitive values in logs | Redaction; never log PINs, OTPs, tokens, or secrets |
+| Excessive requests | Per-user/IP/device rate limits where appropriate |
+
+Do not rely on hiding a button in the frontend as authorization. Every sensitive action must be authorized by the backend.
+
+---
+
+## Step 8 — State Machines and Recovery
+
+Write valid state transitions before implementing retries.
+
+### Example: Recharge state machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING
+    PENDING --> PROCESSING
+    PENDING --> FAILED
+    PROCESSING --> SUCCESS
+    PROCESSING --> FAILED
+    PROCESSING --> UNKNOWN
+    UNKNOWN --> SUCCESS
+    UNKNOWN --> FAILED
+    UNKNOWN --> PROCESSING
+```
+
+`UNKNOWN` means the outcome is uncertain, not that the provider failed. The transition from `UNKNOWN` should be driven by verified provider status or reconciliation—not a blind repeat of the financial operation.
+
+### Example: Transfer state machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING
+    PENDING --> SUCCESS
+    PENDING --> FAILED
+    SUCCESS --> REVERSED
+```
+
+This is a simplified learning model. Define whether a transfer is synchronous or asynchronous and document all allowed transitions. A completed transaction should not be changed arbitrarily; a reversal is a separate auditable business operation.
+
+### Recovery principles
+
+- Every long-running operation has a stable ID and queryable status.
+- Retry policies distinguish transient errors from permanent errors.
+- Background workers must be idempotent.
+- Stale pending operations are monitored and reconciled.
+- Recovery must not create duplicate debits, credits, recharges, or refunds.
+- Manual interventions are permission-controlled and audited.
+
+---
+
+## Step 9 — Test Case Design
+
+Use this pattern:
+
+**Given** a known initial state  
+**When** an edge case occurs  
+**Then** verify the expected result and all side effects.
+
+### Test cases
+
+| Test | Given | When | Expected result |
+|---|---|---|---|
+| Zero amount | Active wallet | Transfer amount is zero | Reject; no debit |
+| Negative amount | Active wallet | Transfer amount is negative | Reject; no debit |
+| Exact limit | Eligible account | Transfer equals allowed limit | Accept if all other checks pass |
+| Over limit | Eligible account | Transfer exceeds limit by one paisa | Reject |
+| Insufficient balance | Balance ৳500 | Send ৳501 plus any fee | Reject; no partial debit |
+| Concurrent transfer | Balance ৳1,000 | Submit ৳700 and ৳600 concurrently | Combined successful debit cannot exceed available funds |
+| Duplicate request | First transfer already processed | Retry with same key and payload | Same operation/result |
+| Key reused incorrectly | Key used with different payload | Submit second payload with same key | Reject conflict |
+| Lost response | Server commits then connection drops | Client retries same key | Return original result |
+| Notification outage | Transfer committed | Notification service is unavailable | Transfer remains committed; notification retries |
+| Provider timeout | Recharge submitted | Provider response times out | Pending/unknown; status verification |
+| Duplicate webhook | Operation already processed | Same provider event arrives again | No duplicate financial effect |
+| Invalid webhook | Invalid signature | Provider callback arrives | Reject and log safely |
+| Duplicate refund | Refund already created | Same refund operation is retried | No second refund |
+| Cross-user access | Transaction belongs to user A | User B requests its details | Deny access without leaking protected details |
+| Database failure | Transfer has not committed | Database connection fails | No partial committed transfer |
+| Worker redelivery | Event was processed | Same job is delivered again | No repeated financial side effect |
+
+### Test types
+
+- **Unit tests:** Individual validators, fee rules, state transition rules.
+- **Integration tests:** API plus database transaction behavior.
+- **Concurrency tests:** Simultaneous requests and duplicate submissions.
+- **Contract tests:** Request/response schema and status codes.
+- **Security tests:** Authorization, replay, rate limiting, input tampering.
+- **Fault-injection tests:** Timeouts, database errors, provider outages, worker crashes.
+- **Reconciliation tests:** Local records compared with provider results.
+
+Do not test concurrency only with mocked repositories. Use a real test database and simultaneous requests to validate the actual locking and transaction strategy.
+
+---
+
+##  Step 10 — Prioritize Edge Cases
+
+Not all edge cases have equal risk. Prioritize by **impact × likelihood**, and consider detectability and recovery cost.
+
+| Priority | Examples | Why |
+|---|---|---|
+| Critical | Double debit, duplicate refund, incorrect ledger posting | Direct financial integrity risk |
+| Critical | Unauthorized transfer or broken object-level authorization | Security and financial loss |
+| High | Provider timeout with uncertain result | Duplicate recharge or incorrect user balance |
+| High | Daily-limit race condition | Regulatory/business-rule violation |
+| High | Database commit followed by lost response | Client retries may duplicate an operation without idempotency |
+| Medium | Notification outage | User experience issue if financial state remains correct |
+| Medium | Large transaction history | Performance and availability |
+| Medium | Invalid catalog/package filter | Incorrect response or poor user experience |
+| Low to medium | Optional display field omitted | Depends on client contract and product impact |
+
+Priorities should be reviewed with business, security, compliance, and operations stakeholders.
+
 
 # 8. Transaction Status Management
 
