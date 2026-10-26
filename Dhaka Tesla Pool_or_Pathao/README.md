@@ -598,185 +598,631 @@ Only valid transitions are accepted by the state machine. Each transition record
 
 PostgreSQL হলো identity, ride, vehicle capacity, pooling, payment, ticket hold, coin এবং audit history-এর source of truth। Prisma schema, migration এবং transactional write পরিচালনা করবে। নিচের ERD-তে বর্তমান ride model-এর সঙ্গে payment ও reward domain যুক্ত করা হয়েছে।
 
+### 7.1 Problem Statement
+
+Dhaka Tesla Pool একটি ride-pooling platform, যেখানে একাধিক passenger compatible pickup zone ও destination corridor অনুযায়ী একই Tesla ride share করতে পারে। System-টিকে passenger booking, driver assignment, seat capacity, payment, ticket hold, ride lifecycle এবং coin reward পরিচালনা করতে হবে।
+
+এই system-এর Database Design এমনভাবে তৈরি করতে হবে, যাতে একাধিক concurrent request, payment failure, expired booking এবং ride status পরিবর্তনের সময় data consistency বজায় থাকে।
+
+প্রধান Database Design Challenges:
+
+1. **User & Role Management:** Passenger এবং Driver-এর account ও সংশ্লিষ্ট profile সংরক্ষণ করা।
+2. **Zone & Route Matching:** Pickup zone, destination zone এবং compatible route corridor-এর তথ্য সংরক্ষণ করা।
+3. **Ride & Driver Assignment:** Ride request, assigned driver, Tesla vehicle এবং ride lifecycle-এর তথ্য পরিচালনা করা।
+4. **Pool Capacity Management:** Tesla-এর fixed seat capacity অনুযায়ী একাধিক ride একই pool-এ যুক্ত করা এবং মোট reserved seat capacity অতিক্রম করা প্রতিরোধ করা।
+5. **Ticket Booking & Seat Hold:** Booking, passenger, reserved seat এবং সর্বোচ্চ ১০ মিনিটের hold expiry সংরক্ষণ করা।
+6. **Concurrent Booking Protection:** একই সময়ে একাধিক passenger booking করলেও pool-এর available capacity অতিক্রম না করা।
+7. **Payment Tracking:** প্রতিটি payment attempt, gateway reference, payment status এবং refund status সংরক্ষণ করা।
+8. **Payment Failure & Recovery:** Failed payment, delayed বা duplicate webhook এবং application crash-এর পরেও payment ও booking-এর সঠিক অবস্থা পুনরুদ্ধার করা।
+9. **Ride Lifecycle & History:** Ride-এর status transition, actor এবং প্রতিটি গুরুত্বপূর্ণ পরিবর্তনের history সংরক্ষণ করা।
+10. **Coin Reward & Ledger:** Ride completion-এর পরে coin reward পরিচালনা করা এবং প্রতিটি credit বা debit-এর audit record রাখা।
+11. **Background Job Processing:** Expired hold, coin settlement এবং asynchronous event processing নির্ভরযোগ্যভাবে পরিচালনা করা।
+12. **Data Integrity:** Foreign Key, Unique Constraint, Check Constraint এবং Database Transaction ব্যবহার করে invalid বা inconsistent data প্রতিরোধ করা।
+
+### 7.2 Entity Identification
+
+উপরের requirements থেকে নিচের প্রধান entities শনাক্ত করা হয়েছে।
+
+| Entity | দায়িত্ব |
+|---|---|
+| `USER` | Passenger, Driver ও অন্যান্য user-এর account তথ্য |
+| `DRIVER` | Driver-এর profile ও online/offline status |
+| `TESLA` | Vehicle এবং তার seat capacity |
+| `ZONE` | Predefined pickup ও destination zone |
+| `RIDE` | Passenger-এর ride request, fare, route ও lifecycle |
+| `POOL` | একই vehicle-এ একাধিক compatible ride grouping |
+| `POOL_MEMBERSHIP` | কোন ride কোন pool-এ যুক্ত এবং কত seat ব্যবহার করছে |
+| `RIDE_HISTORY` | Ride status পরিবর্তনের audit history |
+| `TICKET_BOOKING` | Ticket booking, seat count, hold expiry ও confirmation |
+| `PAYMENT` | Payment attempts, provider references ও payment status |
+| `COIN_WALLET` | User-এর বর্তমান coin balance |
+| `COIN_LEDGER` | Coin credit ও debit-এর append-only history |
+| `OUTBOX_EVENT` | Database transaction থেকে তৈরি asynchronous event |
+| `COIN_JOB` | Coin reward processing, retry ও completion status |
+
+### 7.3 Relationship Design
+
+
+এই section-এ Dhaka Tesla Pool-এর প্রতিটি database table-এর উদ্দেশ্য, গুরুত্বপূর্ণ columns, constraints এবং সংশ্লিষ্ট business logic ব্যাখ্যা করা হয়েছে। Column names বিদ্যমান ER Diagram-এর সঙ্গে সামঞ্জস্য রেখে রাখা হয়েছে।
+
+#### 7.3.1 User & Driver Management
+
+##### Table: `USER`
+
+**Purpose:** Passenger, Driver এবং অন্যান্য user-এর account ও authentication-related তথ্য সংরক্ষণ করা।
+
+| Column | Type | Constraint | Description |
+|---|---|---|---|
+| `id` | UUID | Primary Key | User-এর unique identifier |
+| `name` | String | Required | User-এর নাম |
+| `email` | String | Unique, Required | Login ও communication-এর email |
+| `passwordHash` | String | Required | Hashed password |
+| `role` | Enum | Required | User-এর role, যেমন Passenger বা Driver |
+| `createdAt` | DateTime | Required | Account তৈরির সময় |
+| `updatedAt` | DateTime | Required | সর্বশেষ update-এর সময় |
+
+**Relationship:**
+- একজন User একাধিক Ride request করতে পারে।
+- একজন User-এর একাধিক Ticket Booking থাকতে পারে।
+- একজন User-এর সর্বোচ্চ একটি Driver Profile ও একটি Coin Wallet থাকতে পারে।
+
+##### Table: `DRIVER`
+
+**Purpose:** Driver-specific information এবং availability সংরক্ষণ করা।
+
+| Column | Type | Constraint | Description |
+|---|---|---|---|
+| `id` | UUID | Primary Key | Driver Profile-এর unique identifier |
+| `userId` | UUID | Foreign Key, Unique | সংশ্লিষ্ট `USER.id` |
+| `isOnline` | Boolean | Required | Driver বর্তমানে online কি না |
+| `createdAt` | DateTime | Required | Profile তৈরির সময় |
+| `updatedAt` | DateTime | Required | সর্বশেষ update-এর সময় |
+
+**Relationship:**
+- প্রতিটি Driver Profile একটি User-এর সঙ্গে যুক্ত।
+- একজন Driver সময়ের সঙ্গে একাধিক Ride গ্রহণ করতে পারে।
+- Driver-এর সঙ্গে Tesla যুক্ত থাকতে পারে।
+
+#### 7.3.2 Vehicle & Zone Management
+
+##### Table: `TESLA`
+
+**Purpose:** Ride পরিচালনার জন্য Tesla vehicle এবং তার passenger capacity সংরক্ষণ করা।
+
+| Column | Type | Constraint | Description |
+|---|---|---|---|
+| `id` | UUID | Primary Key | Vehicle-এর unique identifier |
+| `name` | String | Required | Vehicle-এর নাম বা display name |
+| `driverId` | UUID | Foreign Key, Unique | সংশ্লিষ্ট `DRIVER.id` |
+| `capacity` | Integer | Required, Positive | Vehicle-এর মোট passenger seat capacity |
+| `createdAt` | DateTime | Required | Record তৈরির সময় |
+| `updatedAt` | DateTime | Required | সর্বশেষ update-এর সময় |
+
+**Relationship:**
+- একজন Driver-এর সঙ্গে সর্বোচ্চ একটি Tesla যুক্ত।
+- একটি Tesla বিভিন্ন সময়ে একাধিক Pool পরিচালনা করতে পারে।
+
+##### Table: `ZONE`
+
+**Purpose:** Dhaka-এর predefined pickup ও destination zone সংরক্ষণ করা।
+
+| Column | Type | Constraint | Description |
+|---|---|---|---|
+| `id` | UUID | Primary Key | Zone-এর unique identifier |
+| `name` | String | Unique, Required | Zone-এর নাম |
+| `latitude` | Decimal | Optional/Required as implemented | Zone-এর latitude |
+| `longitude` | Decimal | Optional/Required as implemented | Zone-এর longitude |
+| `createdAt` | DateTime | Required | Record তৈরির সময় |
+
+উদাহরণ: Banani, Gulshan 1, Gulshan 2, Mohakhali, Dhanmondi, Mirpur, Uttara, Farmgate এবং Bashundhara।
+
+**Relationship:**
+- একটি Zone অনেক Ride-এর pickup zone হতে পারে।
+- একটি Zone অনেক Ride-এর destination zone হতে পারে।
+
+> Zone-এর latitude ও longitude সংরক্ষণ করা হলেও বর্তমান route matching logic predefined zone ও compatible corridor-এর ওপর নির্ভর করে; এটি নিজে থেকে live map routing নিশ্চিত করে না।
+
+#### 7.3.3 Ride & Pool Management
+
+##### Table: `RIDE`
+
+**Purpose:** Passenger-এর ride request, route, fare, payment method এবং ride lifecycle সংরক্ষণ করা।
+
+| Column | Type | Constraint | Description |
+|---|---|---|---|
+| `id` | UUID | Primary Key | Ride-এর unique identifier |
+| `passengerId` | UUID | Foreign Key | Ride request করা User |
+| `driverId` | UUID | Nullable Foreign Key | Assigned Driver |
+| `teslaId` | UUID | Nullable Foreign Key | Assigned Tesla |
+| `poolId` | UUID | Nullable Foreign Key | সংশ্লিষ্ট Pool |
+| `pickupZoneId` | UUID | Foreign Key | Pickup Zone |
+| `destinationZoneId` | UUID | Foreign Key | Destination Zone |
+| `seatsRequested` | Integer | Positive | Passenger-এর requested seat সংখ্যা |
+| `distanceKm` | Decimal | Non-negative | হিসাব করা route distance |
+| `farePoysha` | Integer | Non-negative | Fare-এর amount in poysha |
+| `poolDiscountPoysha` | Integer | Non-negative | Pooling-এর কারণে discount |
+| `paymentMethod` | Enum | Required | নির্বাচিত Payment Method |
+| `paymentStatus` | Enum | Required | Payment-এর বর্তমান Status |
+| `status` | Enum | Required | Ride lifecycle status |
+| `requestedAt` | DateTime | Required | Ride request-এর সময় |
+| `matchedAt` | DateTime | Nullable | Driver/Pool match হওয়ার সময় |
+| `driverArrivedAt` | DateTime | Nullable | Driver pickup point-এ পৌঁছানোর সময় |
+| `startedAt` | DateTime | Nullable | Ride শুরু হওয়ার সময় |
+| `completedAt` | DateTime | Nullable | Ride সম্পন্ন হওয়ার সময় |
+| `cancelledAt` | DateTime | Nullable | Ride cancel হওয়ার সময় |
+
+**Relationship:**
+- একটি User একাধিক Ride request করতে পারে।
+- একটি Ride-এর সঙ্গে ঐচ্ছিক Driver, Tesla ও Pool যুক্ত হতে পারে।
+- একটি Ride-এর একাধিক History Record এবং Ticket Booking থাকতে পারে।
+
+##### Table: `POOL`
+
+**Purpose:** একই Tesla-তে compatible route-এর একাধিক Ride group করা এবং pool-এর seat capacity নির্ধারণ করা।
+
+| Column | Type | Constraint | Description |
+|---|---|---|---|
+| `id` | UUID | Primary Key | Pool-এর unique identifier |
+| `teslaId` | UUID | Foreign Key | Pool পরিচালনাকারী Tesla |
+| `capacitySeats` | Integer | Positive | Pool তৈরির সময় Tesla-এর capacity snapshot |
+| `status` | Enum | Required | Pool-এর বর্তমান status |
+| `createdAt` | DateTime | Required | Pool তৈরির সময় |
+| `updatedAt` | DateTime | Required | সর্বশেষ update-এর সময় |
+
+**Relationship:**
+- একটি Tesla সময়ের সঙ্গে একাধিক Pool পরিচালনা করতে পারে।
+- একটি Pool-এর একাধিক Ride ও Pool Membership থাকতে পারে।
+
+**Design Note:** `capacitySeats` snapshot রাখার ফলে পরে Tesla-এর capacity update হলেও পুরোনো Pool-এর capacity নিজে থেকে পরিবর্তিত হবে না।
+
+##### Table: `POOL_MEMBERSHIP`
+
+**Purpose:** কোন Ride কোন Pool-এ যুক্ত এবং সেই Ride কত seat ব্যবহার করছে, তা সংরক্ষণ করা।
+
+| Column | Type | Constraint | Description |
+|---|---|---|---|
+| `id` | UUID | Primary Key | Membership-এর unique identifier |
+| `poolId` | UUID | Foreign Key | সংশ্লিষ্ট Pool |
+| `rideId` | UUID | Foreign Key, Unique | Pool-এ যুক্ত Ride |
+| `seats` | Integer | Positive | Ride-এর জন্য বরাদ্দকৃত seat |
+| `joinedAt` | DateTime | Required | Pool-এ যুক্ত হওয়ার সময় |
+
+**Relationship:**
+- একটি Pool-এর একাধিক Membership থাকতে পারে।
+- একটি Ride-এর সর্বোচ্চ একটি Membership Record থাকতে পারে।
+
+**Design Note:** একটি Ride-এর সর্বোচ্চ একটি Membership থাকার নিয়মটি `rideId`-এর Unique Constraint দিয়ে প্রকাশ করা হয়েছে। Pool-এর মোট seat capacity অবশ্যই transaction-level validation বা উপযুক্ত database protection দিয়ে নিশ্চিত করতে হবে।
+
+##### Table: `RIDE_HISTORY`
+
+**Purpose:** Ride-এর গুরুত্বপূর্ণ status change এবং কে সেই পরিবর্তন করেছে, তার audit history সংরক্ষণ করা।
+
+| Column | Type | Constraint | Description |
+|---|---|---|---|
+| `id` | UUID | Primary Key | History Record-এর unique identifier |
+| `rideId` | UUID | Foreign Key | সংশ্লিষ্ট Ride |
+| `actorId` | UUID | Nullable Foreign Key | পরিবর্তনকারী User বা Actor |
+| `fromStatus` | Enum | Nullable | আগের Ride Status |
+| `toStatus` | Enum | Required | নতুন Ride Status |
+| `note` | String | Nullable | পরিবর্তনের কারণ বা অতিরিক্ত তথ্য |
+| `createdAt` | DateTime | Required | Status পরিবর্তনের সময় |
+
+**Relationship:**
+- একটি Ride-এর একাধিক History Record থাকতে পারে।
+- একটি User একাধিক Ride Status পরিবর্তনের Actor হতে পারে।
+
+**Design Note:** History Record-গুলো append-only রাখা উচিত, যাতে Ride-এর পূর্ববর্তী lifecycle পরিবর্তনগুলো audit করা যায়।
+
+#### 7.3.4 Ticket Booking & Payment
+
+##### Table: `TICKET_BOOKING`
+
+**Purpose:** Passenger-এর ticket booking, reserved seat, fare এবং ১০ মিনিটের hold lifecycle পরিচালনা করা।
+
+| Column | Type | Constraint | Description |
+|---|---|---|---|
+| `id` | UUID | Primary Key | Booking-এর unique identifier |
+| `bookingCode` | String | Unique, Required | Customer-এর Booking Reference |
+| `rideId` | UUID | Foreign Key | সংশ্লিষ্ট Ride |
+| `poolId` | UUID | Foreign Key | সংশ্লিষ্ট Pool |
+| `passengerId` | UUID | Foreign Key | Booking করা Passenger |
+| `status` | Enum | Required | `HELD`, `CONFIRMED`, `EXPIRED` বা `CANCELLED` |
+| `seats` | Integer | Positive | Reserved seat সংখ্যা |
+| `totalFarePoysha` | Integer | Non-negative | Booking-এর মোট fare |
+| `heldAt` | DateTime | Required | Hold শুরু হওয়ার সময় |
+| `expiresAt` | DateTime | Required | Hold-এর expiry time |
+| `confirmedAt` | DateTime | Nullable | Booking confirm হওয়ার সময় |
+| `expiredAt` | DateTime | Nullable | Hold expire হওয়ার সময় |
+| `createdAt` | DateTime | Required | Booking Record তৈরির সময় |
+
+**Relationship:**
+- একটি User একাধিক Booking করতে পারে।
+- একটি Ride-এর একাধিক Booking থাকতে পারে।
+- একটি Booking-এর একাধিক Payment Attempt থাকতে পারে।
+
+**Business Rules:**
+- `HELD` Booking নির্ধারিত সময়ের মধ্যে Payment সম্পন্ন করার সুযোগ দেয়।
+- `CONFIRMED` Booking সফলভাবে নিশ্চিত হওয়া Booking নির্দেশ করে।
+- `EXPIRED` Booking-এর hold period শেষ হয়েছে।
+- `CANCELLED` Booking বাতিল হয়েছে।
+
+**Design Note:** Expiry Worker-কে Stock/Seat Release করার আগে Booking-এর বর্তমান Status যাচাই করতে হবে। Payment সফল হলেও Booking-এর eligibility যাচাই ছাড়া অন্ধভাবে `CONFIRMED` করা যাবে না।
+
+##### Table: `PAYMENT`
+
+**Purpose:** Booking-এর প্রতিটি Payment Attempt, Payment Gateway Reference এবং Payment/Refund Status সংরক্ষণ করা।
+
+| Column | Type | Constraint | Description |
+|---|---|---|---|
+| `id` | UUID | Primary Key | Payment Attempt-এর unique identifier |
+| `bookingId` | UUID | Foreign Key | সংশ্লিষ্ট Booking |
+| `method` | Enum | Required | Payment Method |
+| `status` | Enum | Required | Payment বা Refund-এর বর্তমান Status |
+| `amountPoysha` | Integer | Non-negative | Payment Amount |
+| `currency` | String | Required | Currency Code |
+| `provider` | String | Required | Payment Provider |
+| `providerAccount` | String | Required | Provider Account বা Configuration Identifier |
+| `providerPaymentId` | String | Nullable | Gateway-এর Payment Reference |
+| `providerRefundId` | String | Nullable | Gateway-এর Refund Reference |
+| `idempotencyScope` | String | Required | Idempotency-এর Scope |
+| `idempotencyKey` | String | Required | Request Deduplication Key |
+| `webhookEventId` | String | Nullable | সংশ্লিষ্ট Webhook Event Identifier |
+| `paidAt` | DateTime | Nullable | Payment সফল হওয়ার সময় |
+| `createdAt` | DateTime | Required | Payment Record তৈরির সময় |
+| `updatedAt` | DateTime | Required | সর্বশেষ update-এর সময় |
+
+**Relationship:**
+- একটি Booking-এর একাধিক Payment Attempt থাকতে পারে।
+
+**Business Rules:**
+- প্রতিটি Payment Attempt আলাদাভাবে সংরক্ষণ করতে হবে।
+- Provider-এর Payment Result যাচাই করতে হবে।
+- Duplicate Webhook যেন একই Payment-এর financial effect একাধিকবার প্রয়োগ না করে, তা নিশ্চিত করতে হবে।
+- Refund Status ও Provider Reference সঠিকভাবে সংরক্ষণ করতে হবে।
+
+#### 7.3.5 Coin Wallet & Reward Management
+
+##### Table: `COIN_WALLET`
+
+**Purpose:** প্রতিটি User-এর বর্তমান Coin Balance সংরক্ষণ করা।
+
+| Column | Type | Constraint | Description |
+|---|---|---|---|
+| `id` | UUID | Primary Key | Wallet-এর unique identifier |
+| `userId` | UUID | Foreign Key, Unique | Wallet-এর মালিক User |
+| `balance` | Integer | Non-negative | বর্তমান Coin Balance |
+| `updatedAt` | DateTime | Required | সর্বশেষ balance update-এর সময় |
+
+**Relationship:**
+- একটি User-এর সর্বোচ্চ একটি Coin Wallet থাকতে পারে।
+- একটি Wallet-এর একাধিক Ledger Entry থাকতে পারে।
+
+##### Table: `COIN_LEDGER`
+
+**Purpose:** Wallet-এর প্রতিটি Coin Credit ও Debit-এর স্থায়ী হিসাব সংরক্ষণ করা।
+
+| Column | Type | Constraint | Description |
+|---|---|---|---|
+| `id` | UUID | Primary Key | Ledger Entry-এর unique identifier |
+| `walletId` | UUID | Foreign Key | সংশ্লিষ্ট Wallet |
+| `bookingId` | UUID | Nullable Foreign Key | সংশ্লিষ্ট Booking |
+| `entryType` | Enum | Required | Coin Credit বা Debit-এর ধরন |
+| `amount` | Integer | Positive | Coin Transaction-এর পরিমাণ |
+| `referenceType` | String | Required | সংশ্লিষ্ট Business Operation-এর ধরন |
+| `referenceId` | String | Required | সংশ্লিষ্ট Operation-এর Identifier |
+| `createdAt` | DateTime | Required | Ledger Entry তৈরির সময় |
+
+**Relationship:**
+- একটি Wallet-এর একাধিক Ledger Entry থাকতে পারে।
+- একটি Booking-এর সঙ্গে ঐচ্ছিকভাবে একাধিক Ledger Entry যুক্ত থাকতে পারে।
+
+**Design Note:** Ledger-কে append-only রাখতে হবে। Duplicate Reward প্রতিরোধ করতে Reward Operation-এর জন্য Unique Idempotency Reference প্রয়োজন। Wallet Balance ও Ledger-এর consistency বজায় রাখতে উভয় Update একই Database Transaction-এ পরিচালনা করা উচিত।
+
+#### 7.3.6 Background Processing & Reliability
+
+##### Table: `OUTBOX_EVENT`
+
+**Purpose:** Business Database Transaction-এর সঙ্গে সম্পর্কিত Event সংরক্ষণ করা, যাতে Application Crash হলেও Event Dispatch পুনরায় চেষ্টা করা যায়।
+
+| Column | Type | Constraint | Description |
+|---|---|---|---|
+| `id` | UUID | Primary Key | Event-এর unique identifier |
+| `eventType` | String | Required | Event-এর ধরন |
+| `aggregateId` | String | Required | সংশ্লিষ্ট Business Entity-এর Identifier |
+| `payload` | JSON | Required | Event-এর প্রয়োজনীয় Data |
+| `status` | Enum | Required | Event Processing Status |
+| `availableAt` | DateTime | Required | Event Process করার earliest time |
+| `attempts` | Integer | Non-negative | Processing Attempt-এর সংখ্যা |
+| `leaseOwner` | String | Nullable | Event Processing-এর বর্তমান Worker |
+| `leaseUntil` | DateTime | Nullable | Worker Lease-এর Expiry Time |
+| `processedAt` | DateTime | Nullable | সফল Processing-এর সময় |
+
+**Relationship:**
+- একটি Outbox Event থেকে একাধিক Coin Job তৈরি হতে পারে।
+
+**Business Rules:**
+- Business Data ও Outbox Event একই Transaction-এ সংরক্ষণ করতে হবে।
+- Worker Failed Event পুনরায় Process করতে পারবে।
+- Duplicate Event Dispatch হলেও Downstream Operation Idempotent হতে হবে।
+
+##### Table: `COIN_JOB`
+
+**Purpose:** Coin Reward-এর মতো asynchronous task পরিচালনা, retry এবং completion status সংরক্ষণ করা।
+
+| Column | Type | Constraint | Description |
+|---|---|---|---|
+| `id` | UUID | Primary Key | Job-এর unique identifier |
+| `eventId` | UUID | Foreign Key | সংশ্লিষ্ট Outbox Event |
+| `userId` | UUID | Foreign Key | Reward গ্রহণকারী User |
+| `jobType` | String | Required | Job-এর ধরন |
+| `idempotencyKey` | String | Unique, Required | Duplicate Job প্রতিরোধের Key |
+| `status` | Enum | Required | Job-এর Processing Status |
+| `attempts` | Integer | Non-negative | Retry Attempt-এর সংখ্যা |
+| `maxAttempts` | Integer | Positive | সর্বোচ্চ Retry সংখ্যা |
+| `leaseOwner` | String | Nullable | Job Processing Worker |
+| `leaseUntil` | DateTime | Nullable | Worker Lease-এর Expiry |
+| `runAt` | DateTime | Required | Job চালানোর নির্ধারিত সময় |
+| `lastError` | String | Nullable | সর্বশেষ Error Details |
+| `completedAt` | DateTime | Nullable | Job সম্পন্ন হওয়ার সময় |
+
+**Relationship:**
+- একটি Outbox Event-এর একাধিক Job থাকতে পারে।
+- একটি User একাধিক Coin Job পেতে পারে।
+
+**Design Note:** Worker Crash করলে Lease Expire হওয়ার পরে Job পুনরায় Process করা যেতে পারে। Coin Ledger-এর Unique Business Reference ও Idempotency Key Duplicate Reward প্রতিরোধে সহায়তা করবে।
+
+
+| Relationship | Type | ব্যাখ্যা |
+|---|---|---|
+| `USER` → `DRIVER` | One-to-Zero-or-One | একজন User-এর ঐচ্ছিক Driver profile থাকতে পারে |
+| `USER` → `RIDE` | One-to-Many | একজন Passenger একাধিক Ride request করতে পারে |
+| `DRIVER` → `RIDE` | One-to-Many | একজন Driver সময়ের সঙ্গে একাধিক Ride গ্রহণ করতে পারে |
+| `DRIVER` → `TESLA` | One-to-Zero-or-One | একজন Driver-এর সঙ্গে সর্বোচ্চ একটি Tesla যুক্ত |
+| `TESLA` → `POOL` | One-to-Many | একটি Tesla সময়ের সঙ্গে একাধিক Pool পরিচালনা করতে পারে |
+| `ZONE` → `RIDE` | One-to-Many | একটি Zone একাধিক Ride-এর pickup বা destination হতে পারে |
+| `POOL` → `RIDE` | One-to-Many, Optional | একটি Pool-এর সঙ্গে একাধিক Ride যুক্ত হতে পারে |
+| `POOL` → `POOL_MEMBERSHIP` | One-to-Many | Pool-এর প্রতিটি Ride membership record দ্বারা যুক্ত হয় |
+| `RIDE` → `POOL_MEMBERSHIP` | One-to-Zero-or-One | একটি Ride-এর সর্বোচ্চ একটি membership record |
+| `RIDE` → `TICKET_BOOKING` | One-to-Many | একটি Ride-এর জন্য একাধিক Booking তৈরি হতে পারে |
+| `USER` → `TICKET_BOOKING` | One-to-Many | একজন Passenger একাধিক Booking করতে পারে |
+| `TICKET_BOOKING` → `PAYMENT` | One-to-Many | একটি Booking-এর একাধিক Payment Attempt থাকতে পারে |
+| `RIDE` → `RIDE_HISTORY` | One-to-Many | একটি Ride-এর সব status transition সংরক্ষণ করা হয় |
+| `USER` → `COIN_WALLET` | One-to-Zero-or-One | একজন User-এর ঐচ্ছিক Coin Wallet |
+| `COIN_WALLET` → `COIN_LEDGER` | One-to-Many | Wallet-এর প্রতিটি coin transaction ledger-এ সংরক্ষিত হয় |
+| `OUTBOX_EVENT` → `COIN_JOB` | One-to-Many | একটি Event থেকে এক বা একাধিক job তৈরি হতে পারে |
+
+### 7.4 ER Diagram
+
+নিচের diagram-এ User, Driver, Tesla, Zone, Ride, Pool, Booking, Payment, Coin Reward এবং Background Job-এর মধ্যে সম্পর্ক দেখানো হয়েছে।
+
 ```mermaid
+
 erDiagram
+    USER {
+        UUID id PK
+        string name
+        string email UK
+        string passwordHash
+        enum role
+        datetime createdAt
+        datetime updatedAt
+    }
+
+    DRIVER {
+        UUID id PK
+        UUID userId FK, UK
+        boolean isOnline
+        datetime createdAt
+        datetime updatedAt
+    }
+
+    TESLA {
+        UUID id PK
+        string name
+        UUID driverId FK, UK
+        int capacity
+        datetime createdAt
+        datetime updatedAt
+    }
+
+    ZONE {
+        UUID id PK
+        string name UK
+        decimal latitude
+        decimal longitude
+        datetime createdAt
+    }
+
+    RIDE {
+        UUID id PK
+        UUID passengerId FK
+        UUID driverId FK
+        UUID teslaId FK
+        UUID poolId FK
+        UUID pickupZoneId FK
+        UUID destinationZoneId FK
+        int seatsRequested
+        decimal distanceKm
+        int farePoysha
+        int poolDiscountPoysha
+        enum paymentMethod
+        enum paymentStatus
+        enum status
+        datetime requestedAt
+        datetime matchedAt
+        datetime driverArrivedAt
+        datetime startedAt
+        datetime completedAt
+        datetime cancelledAt
+    }
+
+    POOL {
+        UUID id PK
+        UUID teslaId FK
+        int capacitySeats
+        enum status
+        datetime createdAt
+        datetime updatedAt
+    }
+
+    POOL_MEMBERSHIP {
+        UUID id PK
+        UUID poolId FK
+        UUID rideId FK, UK
+        int seats
+        datetime joinedAt
+    }
+
+    RIDE_HISTORY {
+        UUID id PK
+        UUID rideId FK
+        UUID actorId FK
+        enum fromStatus
+        enum toStatus
+        string note
+        datetime createdAt
+    }
+
+    TICKET_BOOKING {
+        UUID id PK
+        string bookingCode UK
+        UUID rideId FK
+        UUID poolId FK
+        UUID passengerId FK
+        enum status
+        int seats
+        int totalFarePoysha
+        datetime heldAt
+        datetime expiresAt
+        datetime confirmedAt
+        datetime expiredAt
+        datetime createdAt
+    }
+
+    PAYMENT {
+        UUID id PK
+        UUID bookingId FK
+        enum method
+        enum status
+        int amountPoysha
+        string currency
+        string provider
+        string providerAccount
+        string providerPaymentId
+        string providerRefundId
+        string idempotencyScope
+        string idempotencyKey
+        string webhookEventId
+        datetime paidAt
+        datetime createdAt
+        datetime updatedAt
+    }
+
+    COIN_WALLET {
+        UUID id PK
+        UUID userId FK, UK
+        int balance
+        datetime updatedAt
+    }
+
+    COIN_LEDGER {
+        UUID id PK
+        UUID walletId FK
+        UUID bookingId FK
+        enum entryType
+        int amount
+        string referenceType
+        string referenceId
+        datetime createdAt
+    }
+
+    OUTBOX_EVENT {
+        UUID id PK
+        string eventType
+        string aggregateId
+        json payload
+        enum status
+        datetime availableAt
+        int attempts
+        string leaseOwner
+        datetime leaseUntil
+        datetime processedAt
+    }
+
+    COIN_JOB {
+        UUID id PK
+        UUID eventId FK
+        UUID userId FK
+        string jobType
+        string idempotencyKey UK
+        enum status
+        int attempts
+        int maxAttempts
+        string leaseOwner
+        datetime leaseUntil
+        datetime runAt
+        string lastError
+        datetime completedAt
+    }
+
     USER ||--o| DRIVER : has_optional_profile
     USER ||--o{ RIDE : requests
-    USER o|--o{ RIDE_HISTORY : acts_on_optionally
+    USER ||--o{ TICKET_BOOKING : owns
+
     DRIVER ||--o| TESLA : drives
-    DRIVER o|--o{ RIDE : accepts_optionally
-    TESLA o|--o{ RIDE : fulfills_optionally
-    TESLA ||--o{ POOL : hosts
+    DRIVER o|--o{ RIDE : accepts
+    TESLA o|--o{ RIDE : fulfills
+
     ZONE ||--o{ RIDE : pickup
     ZONE ||--o{ RIDE : destination
-    POOL o|--o{ RIDE : groups_optionally
+
+    TESLA ||--o{ POOL : hosts
+    POOL o|--o{ RIDE : groups
     POOL ||--o{ POOL_MEMBERSHIP : contains
-    POOL ||--o{ TICKET_BOOKING : reserves_seats
-    RIDE ||--o| POOL_MEMBERSHIP : has_one
+    RIDE ||--o| POOL_MEMBERSHIP : has_membership
+
+    RIDE ||--o{ TICKET_BOOKING : has
     RIDE ||--o{ RIDE_HISTORY : records
-    RIDE ||--o{ TICKET_BOOKING : books
-    USER ||--o{ TICKET_BOOKING : owns
+    USER o|--o{ RIDE_HISTORY : acts_on
+
     TICKET_BOOKING ||--o{ PAYMENT : has_attempts
+
     USER ||--o| COIN_WALLET : owns
     COIN_WALLET ||--o{ COIN_LEDGER : records
-    TICKET_BOOKING ||--o{ COIN_LEDGER : rewards_optional
+    TICKET_BOOKING o|--o{ COIN_LEDGER : rewards
+
     OUTBOX_EVENT ||--o{ COIN_JOB : triggers
     USER ||--o{ COIN_JOB : receives_rewards
 
-    USER {
-      uuid id PK
-      string name
-      string email UK
-      string passwordHash
-      Role role
-      datetime createdAt
-      datetime updatedAt
-    }
-    DRIVER {
-      uuid id PK
-      string userId FK, UK
-      boolean isOnline
-      datetime createdAt
-      datetime updatedAt
-    }
-    TESLA {
-      uuid id PK
-      string name
-      string driverId FK, UK
-      int capacity
-      datetime createdAt
-      datetime updatedAt
-    }
-    ZONE {
-      uuid id PK
-      string name UK
-      decimal latitude
-      decimal longitude
-      datetime createdAt
-    }
-    POOL {
-      uuid id PK
-      string teslaId FK
-      int capacitySeats "snapshot of Tesla capacity"
-      RideStatus status
-      datetime createdAt
-      datetime updatedAt
-    }
-    RIDE {
-      uuid id PK
-      string passengerId FK
-      string driverId FK "nullable"
-      string teslaId FK "nullable"
-      string poolId FK "nullable"
-      string pickupZoneId FK
-      string destinationZoneId FK
-      int seatsRequested
-      decimal distanceKm
-      int farePoysha
-      int poolDiscountPoysha
-      PaymentMethod paymentMethod
-      PaymentStatus paymentStatus
-      RideStatus status
-      datetime requestedAt
-      datetime matchedAt "nullable"
-      datetime driverArrivedAt "nullable"
-      datetime startedAt "nullable"
-      datetime completedAt "nullable"
-      datetime cancelledAt "nullable"
-    }
-    POOL_MEMBERSHIP {
-      uuid id PK
-      string poolId FK
-      string rideId FK, UK
-      int seats
-      datetime joinedAt
-    }
-    RIDE_HISTORY {
-      uuid id PK
-      string rideId FK
-      string actorId FK "nullable"
-      RideStatus fromStatus "nullable"
-      RideStatus toStatus
-      string note "nullable"
-      datetime createdAt
-    }
-    TICKET_BOOKING {
-      uuid id PK
-      string bookingCode UK
-      string rideId FK
-      string poolId FK
-      string passengerId FK
-      BookingStatus status "HELD/CONFIRMED/EXPIRED/CANCELLED"
-      int seats
-      int totalFarePoysha
-      datetime heldAt
-      datetime expiresAt
-      datetime confirmedAt "nullable"
-      datetime expiredAt "nullable"
-      datetime createdAt
-    }
-    PAYMENT {
-      uuid id PK
-      string bookingId FK
-      PaymentMethod method
-      PaymentStatus status "REQUIRES_PAYMENT/PROCESSING/SUCCEEDED/FAILED/REFUND_PENDING/REFUND_FAILED/REFUNDED"
-      int amountPoysha
-      string currency
-      string provider
-      string providerAccount
-      string providerPaymentId "nullable"
-      string providerRefundId "nullable"
-      string idempotencyScope
-      string idempotencyKey
-      string webhookEventId "nullable"
-      datetime paidAt "nullable"
-      datetime createdAt
-      datetime updatedAt
-    }
-    COIN_WALLET {
-      uuid id PK
-      string userId FK, UK
-      int balance
-      datetime updatedAt
-    }
-    COIN_LEDGER {
-      uuid id PK
-      string walletId FK
-      string bookingId FK "nullable"
-      CoinEntryType entryType
-      int amount
-      string referenceType
-      string referenceId
-      datetime createdAt
-    }
-    OUTBOX_EVENT {
-      uuid id PK
-      string eventType
-      string aggregateId
-      json payload
-      OutboxStatus status
-      datetime availableAt
-      int attempts
-      string leaseOwner "nullable"
-      datetime leaseUntil "nullable"
-      datetime processedAt "nullable"
-    }
-    COIN_JOB {
-      uuid id PK
-      string eventId FK
-      string userId FK
-      string jobType
-      string idempotencyKey UK
-      JobStatus status
-      int attempts
-      int maxAttempts
-      string leaseOwner "nullable"
-      datetime leaseUntil "nullable"
-      datetime runAt
-      string lastError "nullable"
-      datetime completedAt "nullable"
-    }
 ```
+
+### 7.5 Database Constraints & Integrity
+
+ER Diagram relationship দেখায়, কিন্তু সব business rule শুধু relationship দিয়ে নিশ্চিত করা যায় না। তাই Database Constraints এবং Transaction Logic-ও প্রয়োজন।
+
+- **Foreign Keys:** Ride, Booking, Payment ও Wallet-এর reference যেন valid record নির্দেশ করে।
+- **Unique Constraints:** User email, booking code, driver-user association এবং coin job idempotency key-এর uniqueness নিশ্চিত করা।
+- **Check Constraints:** Seat count, fare ও coin amount-এর মতো field-এর valid range নিশ্চিত করা।
+- **Capacity Validation:** Pool-এর মোট active reserved seat যেন Tesla-এর `capacitySeats` অতিক্রম না করে।
+- **Booking Expiry:** `expiresAt` ব্যবহার করে hold-এর expiry নির্ধারণ করা এবং expiry worker-এ booking-এর বর্তমান status যাচাই করা।
+- **Payment Idempotency:** একই gateway event বা payment request একাধিকবার process হয়ে duplicate financial effect তৈরি করা প্রতিরোধ করা।
+- **Coin Ledger Integrity:** Coin reward-এর duplicate credit প্রতিরোধ করা এবং wallet balance ও ledger entries-এর consistency বজায় রাখা।
+- **Audit History:** Ride status পরিবর্তনের সময় `RIDE_HISTORY`-তে actor, previous status, new status ও timestamp সংরক্ষণ করা।
+
+### 7.6 Transaction & Concurrency Control
+
+একই pool-এর শেষ available seat একাধিক passenger একসঙ্গে book করার চেষ্টা করতে পারে। শুধু API-level validation যথেষ্ট নয়, কারণ concurrent request একই সময়ে একই capacity দেখতে পারে।
+
+তাই Booking ও Pool Capacity পরিচালনার সময়:
+
+1. Database-এর বর্তমান Pool ও Booking state যাচাই করতে হবে।
+2. প্রয়োজন অনুযায়ী Serializable Transaction বা উপযুক্ত row-level locking ব্যবহার করতে হবে।
+3. Active reservation-এর seat count হিসাব করে capacity যাচাই করতে হবে।
+4. Capacity available থাকলে Booking ও Hold Expiry সংরক্ষণ করতে হবে।
+5. Transaction conflict হলে bounded retry করতে হবে; capacity না থাকলে request প্রত্যাখ্যান করতে হবে।
+6. Payment webhook ও expiry worker-কে একই Booking-এর state transition নিরাপদভাবে পরিচালনা করতে হবে।
+
+**মূল সিদ্ধান্ত:** Database-ই booking capacity ও financial state-এর authoritative source of truth হবে। API-level checks user experience উন্নত করতে পারে, কিন্তু concurrent booking এবং payment consistency নিশ্চিত করতে Database-level protection প্রয়োজন।
 
 Preview-safe relationship map:
 
