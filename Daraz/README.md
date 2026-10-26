@@ -389,348 +389,501 @@ A production-ready e-commerce system must handle failure scenarios, not just the
 
 ## 5. Database Design
 
-I would use PostgreSQL because orders, payments, and inventory require transactions, foreign keys, unique constraints, and row-level locking. Money would be stored in integer minor units (`price_minor`), not floating-point values.
+This database design follows a requirements-driven approach: first understand the business requirements, then identify entities, normalize the data, define attributes, establish relationships, and finally ensure data integrity through constraints, indexes, and transactions.
 
-### 5.1 `users`
+PostgreSQL is used as the primary transactional database because order, payment, and inventory management require reliable transactions, foreign keys, unique constraints, and row-level locking. Monetary amounts are stored as integer minor units (for example, `price_minor`) rather than floating-point values.
 
-| Column | Type | Rule |
+### 5.1 Understanding the Requirements
+
+Before creating database tables, understand the business problem and business rules. Database design starts with the problem, not with tables.
+
+This platform must support the following:
+
+1. Store and manage information related to Customers, Sellers, Products, Carts, Orders, Payments, and Inventory.
+2. Allow customers to browse products, view product details and prices, add products to their cart, and check out.
+3. Allow sellers to add, update, and remove products, and manage product prices and stock quantities.
+4. Temporarily reserve the required stock during checkout so that simultaneous orders do not sell more products than the available stock (**overselling prevention**).
+5. Prevent duplicate orders when the same checkout request is submitted repeatedly (**idempotency**).
+6. Keep a record of every payment attempt and determine the correct payment status by verifying the payment result received from the payment gateway.
+7. Properly handle payment failures, delayed or duplicate webhooks, and application crashes.
+8. Expire stock reservations and make reserved stock available again if payment is not completed within the specified time.
+9. Maintain consistency among order, payment, and inventory data to prevent incorrect status updates, overselling, or inconsistent data.
+10. Support coupon and discount application, order cancellation and refunds, shipment tracking, and customer notifications.
+
+#### 5.1.1 Business Rules and Their Impact on Database Design
+
+| Business Rule | Impact on Database Design |
+|---|---|
+| A user can place multiple orders. | `orders.user_id` references `users.id` through a foreign key. |
+| A seller can manage multiple products. | `products.seller_id` references `users.id` through a foreign key. |
+| Each product has one inventory record in this design. | `inventory.product_id` is the primary key and references `products.id`. |
+| A cart can contain multiple products. | Use `cart_items` as a junction table. |
+| An order can contain multiple products. | `order_items` stores each product and its quantity in an order. |
+| Stock must never become negative. | Use a non-negative `CHECK` constraint and transactional stock updates. |
+| A checkout retry must not create a duplicate order. | Use an idempotency key with a unique constraint. |
+| A product's current price may change after an order is placed. | Store a snapshot of the product name and price at order time in `order_items`. |
+| An order can have multiple payment attempts. | Establish a one-to-many relationship between `orders` and `payments`. |
+| Payment webhooks may arrive multiple times. | Deduplicate events using a unique provider event identifier. |
+| Reserved stock must eventually be released or finalized. | Store reservation status and expiry time in `stock_reservations`. |
+| A confirmed order may trigger notifications or other asynchronous tasks. | Write an `outbox_events` record in the same database transaction. |
+| The system must support order shipment and tracking. | Store shipment information in the `shipments` table. |
+
+### 5.2 Identifying Entities
+
+An entity is a distinct business object whose information must be stored in the system.
+
+| Entity | Why It Is Needed |
+|---|---|
+| `users` | Stores customer, seller, and admin accounts. |
+| `products` | Stores product details, seller ownership, price, and status. |
+| `inventory` | Stores each product's available and reserved quantities. |
+| `carts` | Stores the main record for a customer's shopping cart. |
+| `cart_items` | Stores which products are in each cart and their quantities. |
+| `orders` | Stores the main order record, financial totals, and lifecycle status. |
+| `order_items` | Stores each product in an order, its quantity, and the order-time price snapshot. |
+| `payments` | Stores payment attempts and gateway references. |
+| `coupons` | Stores coupon rules, discount values, and redemption limits. |
+| `coupon_redemptions` | Tracks coupon reservations and usage by user and order. |
+| `stock_reservations` | Stores stock reservation status and expiry time for an order. |
+| `stock_reservation_items` | Stores the quantity of each product in a reservation. |
+| `payment_webhook_events` | Tracks payment webhook events and their processing status. |
+| `outbox_events` | Stores events that must be published after a database transaction commits. |
+| `shipments` | Stores courier, tracking number, and delivery status. |
+
+#### 5.2.1 Why Keep `products` and `inventory` Separate?
+
+The `products` table contains relatively stable product information, such as name, description, seller, and current price. The `inventory` table contains stock quantities that change frequently.
+
+Keeping them separate clarifies responsibilities and allows inventory updates to be controlled independently. In this design, each product has one inventory record. If there are multiple warehouses, add warehouse/location entities and maintain inventory for each product-location combination.
+
+### 5.3 Normalization vs. Denormalization
+
+Normalization reduces unnecessary data duplication and helps prevent insertion, update, and deletion anomalies. Start with a normalized transactional schema; introduce denormalization only when measured performance requirements justify it.
+
+#### 5.3.1 First Normal Form (1NF)
+
+**Rule:** Each column must contain one logical value. Repeating groups should be stored as separate rows.
+
+Avoid storing multiple products in a single field:
+
+| `order_id` | `products` |
+|---|---|
+| `O101` | `Shirt x 2, Headphones x 1` |
+
+Instead, store each product in a separate row in `order_items`.
+
+**`orders`**
+
+| `id` | `user_id` | `status` |
+|---|---|---|
+| `O101` | `U101` | `PENDING_PAYMENT` |
+
+**`order_items`**
+
+| `order_id` | `product_id` | `quantity` |
+|---|---|---:|
+| `O101` | `P201` | 2 |
+| `O101` | `P305` | 1 |
+
+This allows each order item to be queried, validated, and updated independently.
+
+#### 5.3.2 Second Normal Form (2NF)
+
+**Rule:** A table must satisfy 1NF, and every non-key attribute must depend on the entire candidate key, not just part of a composite key.
+
+For example, the composite key of `cart_items` is `(cart_id, product_id)`. The `quantity` depends on that cart-product pair. However, product details such as `product_name` and `seller_id` belong in the `products` table rather than being repeatedly stored in `cart_items`.
+
+#### 5.3.3 Third Normal Form (3NF)
+
+**Rule:** A table must satisfy 2NF, and non-key attributes must not depend transitively on other non-key attributes.
+
+For example, avoid storing `seller_name` in every product row. Seller information can be obtained through the relationship `products.seller_id` → `users.id`. Keep seller account information in `users` and reference it from `products`.
+
+#### 5.3.4 Why Store Price Snapshots in `order_items`?
+
+A product's current price and the price accepted by a customer when placing an order have different business meanings.
+
+- `products.price_minor`: The currently displayed price.
+- `order_items.unit_price_minor`: The unit price accepted when the order was placed.
+- `order_items.product_name_snapshot`: The product name at order time.
+- `order_items.line_total_minor`: The total price for that order item.
+
+**Example:** A customer orders a shirt when its price is BDT 500. Later, the seller increases the price to BDT 600. The shirt's unit price in the earlier order remains BDT 500. This is intentional historical duplication, not an accidental normalization error.
+
+#### 5.3.5 When Should Denormalization Be Used?
+
+Data may be intentionally duplicated or precomputed to improve read performance. Examples include:
+
+- Cached details for frequently viewed product pages.
+- Precomputed product ratings or sales summaries.
+- Reporting tables for daily order totals.
+- Optimized search indexes for product discovery.
+
+Keep PostgreSQL as the authoritative source for transactional order and inventory data. Use indexes first, and add caching or read models only when performance measurements justify them. Final stock-allocation decisions must not depend on a cache.
+
+### 5.4 Defining Attributes
+
+For each attribute, determine what it represents, which data type it uses, whether it can be `NULL`, whether it must be unique, whether it needs a foreign key, and which defaults or validation constraints apply.
+
+The following schema describes the logical design of the core database. Apply the specified constraints when creating the actual PostgreSQL DDL.
+
+#### 5.4.1 `users`
+
+Stores customer, seller, and admin accounts.
+
+| Column | Type | Constraint / Purpose |
 |---|---|---|
 | `id` | UUID | Primary key |
-| `name` | VARCHAR(120) | NOT NULL |
-| `email` | VARCHAR(255) | UNIQUE, NOT NULL |
-| `password_hash` | TEXT | Never store plaintext |
-| `role` | VARCHAR(20) | `CUSTOMER`, `SELLER`, `ADMIN` |
-| `created_at` | TIMESTAMPTZ | NOT NULL |
+| `name` | VARCHAR(120) | `NOT NULL` |
+| `email` | VARCHAR(255) | `UNIQUE`, `NOT NULL` |
+| `password_hash` | TEXT | Store a password hash, never plaintext; may be nullable when using external authentication |
+| `role` | VARCHAR(20) | `CUSTOMER`, `SELLER`, or `ADMIN`; `NOT NULL` |
+| `created_at` | TIMESTAMPTZ | `NOT NULL`, defaults to the current time |
 
-Purpose: Stores account information for customers, sellers, and administrators.
+#### 5.4.2 `products`
 
-- `id` — Unique user ID
-- `name`, `email` — Identity information
-- `password_hash` — Hashed password
-- `role` — `CUSTOMER`, `SELLER`, or `ADMIN`
+Stores product details and seller ownership.
 
-Example: A seller logs in and manages their own products.
-
-### 5.2 `products`
-
-| Column | Type | Rule |
+| Column | Type | Constraint / Purpose |
 |---|---|---|
 | `id` | UUID | Primary key |
-| `seller_id` | UUID | FK → `users.id` |
-| `name` | VARCHAR(255) | NOT NULL |
+| `seller_id` | UUID | Foreign key referencing `users.id`, `NOT NULL` |
+| `name` | VARCHAR(255) | `NOT NULL` |
 | `description` | TEXT | Optional |
-| `price_minor` | BIGINT | `>= 0` |
-| `currency` | CHAR(3) | For example, `BDT` |
-| `status` | VARCHAR(20) | `DRAFT`, `ACTIVE`, `INACTIVE` |
-| `created_at` | TIMESTAMPTZ | NOT NULL |
-| `updated_at` | TIMESTAMPTZ | NOT NULL |
+| `price_minor` | BIGINT | `NOT NULL`, `CHECK (price_minor >= 0)` |
+| `currency` | CHAR(3) | `NOT NULL`, e.g. `BDT` |
+| `status` | VARCHAR(20) | `DRAFT`, `ACTIVE`, or `INACTIVE`; `NOT NULL` |
+| `created_at` | TIMESTAMPTZ | `NOT NULL` |
+| `updated_at` | TIMESTAMPTZ | `NOT NULL` |
 
-Purpose: Stores product details belonging to sellers.
+**Business rule:** Only an authorized seller can create or update their own products. Validate ownership in the application authorization layer and maintain the correct `seller_id` relationship.
 
-- `seller_id` — Identifies the seller who owns the product
-- `name`, `description` — Product details
-- `price_minor`, `currency` — Price and currency
-- `status` — `ACTIVE`, `INACTIVE`, etc.
+#### 5.4.3 `inventory`
 
-Example: A seller adds a mobile phone's name, price, and description.
+Stores the stock quantity for each product.
 
-### 5.3 `inventory`
-
-| Column | Type | Rule |
+| Column | Type | Constraint / Purpose |
 |---|---|---|
-| `product_id` | UUID | PK and FK → `products.id` |
-| `available_qty` | INTEGER | `>= 0` |
-| `reserved_qty` | INTEGER | `>= 0` |
-| `updated_at` | TIMESTAMPTZ | NOT NULL |
+| `product_id` | UUID | Primary key and foreign key referencing `products.id` |
+| `available_qty` | INTEGER | `NOT NULL`, `CHECK (available_qty >= 0)` |
+| `reserved_qty` | INTEGER | `NOT NULL`, `CHECK (reserved_qty >= 0)` |
+| `updated_at` | TIMESTAMPTZ | `NOT NULL` |
 
-`available_qty` represents stock available for new orders. `reserved_qty` represents stock held by active reservations.
+Here, `available_qty` represents stock that can be reserved for new orders, while `reserved_qty` represents stock held by active reservations. Reserve stock atomically when creating an order. When an order is confirmed, finalize the reserved stock; when a reservation expires or an eligible failure occurs, release it.
 
-Purpose: Tracks the available and reserved stock of each product.
+#### 5.4.4 `carts`
 
-- `product_id` — Identifies the product whose stock is tracked
-- `available_qty` — Stock remaining for new orders
-- `reserved_qty` — Stock reserved while awaiting payment
+Stores the main record for a customer's cart.
 
-Example: There are 10 units in stock. When a customer checks out 2 units, the available stock becomes 8 and the reserved stock becomes 2.
-
-### 5.4 `carts`
-
-| Column | Type | Rule |
+| Column | Type | Constraint / Purpose |
 |---|---|---|
 | `id` | UUID | Primary key |
-| `user_id` | UUID | FK → `users.id` |
-| `status` | VARCHAR(20) | `ACTIVE`, `CONVERTED`, `ABANDONED` |
-| `updated_at` | TIMESTAMPTZ | NOT NULL |
+| `user_id` | UUID | Foreign key referencing `users.id`, `NOT NULL` |
+| `status` | VARCHAR(20) | `ACTIVE`, `CONVERTED`, or `ABANDONED`; `NOT NULL` |
+| `updated_at` | TIMESTAMPTZ | `NOT NULL` |
 
-Purpose: Stores the main record for a customer's shopping cart.
+If the business rule permits only one active cart per user, enforce it with an appropriate partial unique index.
 
-- `id` — Cart ID
-- `user_id` — Owner of the cart
-- `status` — `ACTIVE`, `CONVERTED`, or `ABANDONED`
+#### 5.4.5 `cart_items`
 
-Example: Identifies a customer's current shopping cart.
+Stores which products are in each cart and their quantities.
 
-### 5.5 `cart_items`
-
-| Column | Type | Rule |
+| Column | Type | Constraint / Purpose |
 |---|---|---|
-| `cart_id` | UUID | FK → `carts.id` |
-| `product_id` | UUID | FK → `products.id` |
-| `quantity` | INTEGER | `> 0` |
-| `added_at` | TIMESTAMPTZ | NOT NULL |
+| `cart_id` | UUID | Foreign key referencing `carts.id` |
+| `product_id` | UUID | Foreign key referencing `products.id` |
+| `quantity` | INTEGER | `NOT NULL`, `CHECK (quantity > 0)` |
+| `added_at` | TIMESTAMPTZ | `NOT NULL` |
 
-Purpose: Stores which products are in a cart and their quantities.
+**Primary key:** `(cart_id, product_id)`.
 
-- `cart_id` — Identifies the cart
-- `product_id` — Identifies the product
-- `quantity` — Number of units
+The cart price is not authoritative. During checkout, the backend must read the current price from the database again and validate the product status and stock.
 
-Example: A cart contains 2 shirts and 1 headphone.
+#### 5.4.6 `orders`
 
-Remember: The cart price is not final. The backend must revalidate the current price from the database during checkout.
+Stores the main order record and financial totals.
 
-**Constraint:** `PRIMARY KEY (cart_id, product_id)`. The cart price is not authoritative; the price must be retrieved from the database again during checkout.
-
-### 5.6 `orders`
-
-| Column | Type | Rule |
+| Column | Type | Constraint / Purpose |
 |---|---|---|
 | `id` | UUID | Primary key |
-| `user_id` | UUID | FK → `users.id` |
-| `status` | VARCHAR(30) | Order status |
-| `subtotal_minor` | BIGINT | `>= 0` |
-| `discount_minor` | BIGINT | `>= 0` |
-| `shipping_minor` | BIGINT | `>= 0` |
-| `total_minor` | BIGINT | `>= 0` |
-| `currency` | CHAR(3) | NOT NULL |
-| `idempotency_key` | VARCHAR(128) | Retry protection |
-| `created_at` | TIMESTAMPTZ | NOT NULL |
-| `updated_at` | TIMESTAMPTZ | NOT NULL |
+| `user_id` | UUID | Foreign key referencing `users.id`, `NOT NULL` |
+| `status` | VARCHAR(30) | Order lifecycle status, `NOT NULL` |
+| `subtotal_minor` | BIGINT | `NOT NULL`, `CHECK (subtotal_minor >= 0)` |
+| `discount_minor` | BIGINT | `NOT NULL`, `CHECK (discount_minor >= 0)` |
+| `shipping_minor` | BIGINT | `NOT NULL`, `CHECK (shipping_minor >= 0)` |
+| `total_minor` | BIGINT | `NOT NULL`, `CHECK (total_minor >= 0)` |
+| `currency` | CHAR(3) | `NOT NULL` |
+| `idempotency_key` | VARCHAR(128) | Protects against checkout retries |
+| `created_at` | TIMESTAMPTZ | `NOT NULL` |
+| `updated_at` | TIMESTAMPTZ | `NOT NULL` |
 
-**Constraint:** `UNIQUE(user_id, idempotency_key)`. A different payload using the same key returns `409 Conflict`.
+**Constraint:** `UNIQUE (user_id, idempotency_key)`.
 
-Purpose: Stores the main order record and its current state.
+If checkout is retried with the same key, return the previous request's result instead of creating a new order. If the same key is reused with a different payload, return a response such as `409 Conflict`. A request hash can be stored or compared to detect payload mismatches.
 
-- `id` — Order ID
-- `user_id` — Customer who placed the order
-- `status` — `PENDING_PAYMENT`, `CONFIRMED`, `EXPIRED`, etc.
-- `subtotal_minor`, `discount_minor`, `shipping_minor`, `total_minor` — Financial breakdown of the order
-- `idempotency_key` — Helps prevent duplicate orders when the same checkout request is retried
+#### 5.4.7 `order_items`
 
-Example: Order #101 is awaiting payment.
+Stores each order item and its historical product information.
 
-### 5.7 `order_items`
-
-| Column | Type | Rule |
+| Column | Type | Constraint / Purpose |
 |---|---|---|
 | `id` | UUID | Primary key |
-| `order_id` | UUID | FK → `orders.id` |
-| `product_id` | UUID | FK → `products.id` |
-| `product_name_snapshot` | VARCHAR(255) | Name at order time |
-| `unit_price_minor` | BIGINT | `>= 0` |
-| `quantity` | INTEGER | `> 0` |
-| `line_total_minor` | BIGINT | `>= 0` |
+| `order_id` | UUID | Foreign key referencing `orders.id`, `NOT NULL` |
+| `product_id` | UUID | Foreign key referencing `products.id`, `NOT NULL` |
+| `product_name_snapshot` | VARCHAR(255) | Product name at order time, `NOT NULL` |
+| `unit_price_minor` | BIGINT | `NOT NULL`, `CHECK (unit_price_minor >= 0)` |
+| `quantity` | INTEGER | `NOT NULL`, `CHECK (quantity > 0)` |
+| `line_total_minor` | BIGINT | `NOT NULL`, `CHECK (line_total_minor >= 0)` |
 
-Price and name snapshots must be stored so that future product updates do not change historical orders.
+The backend must calculate line totals and order totals from validated prices and quantities. Never trust totals submitted by the client.
 
-Purpose: Stores the products included in an order, their purchase prices, and their quantities.
+#### 5.4.8 `payments`
 
-- `order_id` — Identifies the order containing the item
-- `product_id` — Identifies the product
-- `product_name_snapshot` — Product name at purchase time
-- `unit_price_minor` — Unit price at purchase time
-- `quantity`, `line_total_minor` — Quantity and total price for the item
+Stores payment attempts and payment gateway references.
 
-Example: Order #101 contains 2 shirts purchased at 500 each.
-
-Why are snapshots necessary? Even if a seller changes the product's name or price later, the historical order remains unchanged.
-
-### 5.8 `payments`
-
-| Column | Type | Rule |
+| Column | Type | Constraint / Purpose |
 |---|---|---|
 | `id` | UUID | Primary key |
-| `order_id` | UUID | FK → `orders.id` |
-| `provider` | VARCHAR(40) | Gateway name |
-| `provider_payment_id` | VARCHAR(255) | Provider reference |
-| `amount_minor` | BIGINT | `> 0` |
-| `currency` | CHAR(3) | NOT NULL |
-| `status` | VARCHAR(20) | Payment status |
-| `idempotency_key` | VARCHAR(128) | Provider deduplication |
-| `created_at` | TIMESTAMPTZ | NOT NULL |
-| `updated_at` | TIMESTAMPTZ | NOT NULL |
+| `order_id` | UUID | Foreign key referencing `orders.id`, `NOT NULL` |
+| `provider` | VARCHAR(40) | Gateway name, `NOT NULL` |
+| `provider_payment_id` | VARCHAR(255) | Gateway reference; unique per provider when present |
+| `amount_minor` | BIGINT | `NOT NULL`, `CHECK (amount_minor > 0)` |
+| `currency` | CHAR(3) | `NOT NULL` |
+| `status` | VARCHAR(20) | Payment lifecycle status, `NOT NULL` |
+| `idempotency_key` | VARCHAR(128) | Safe retry key for payment attempts |
+| `created_at` | TIMESTAMPTZ | `NOT NULL` |
+| `updated_at` | TIMESTAMPTZ | `NOT NULL` |
 
-**Constraint:** `UNIQUE(provider, provider_payment_id)`.
+Use a unique constraint on `(provider, provider_payment_id)` when a provider reference is present. Since an order may have multiple payment attempts, confirmation logic must ensure that the order is not fulfilled more than once and that more money is not collected than is owed.
 
-Purpose: Stores payment attempts and references from the payment gateway.
+#### 5.4.9 `coupons`
 
-- `order_id` — Identifies the order being paid for
-- `provider` — Payment gateway name
-- `provider_payment_id` — Payment reference from the gateway
-- `amount_minor`, `currency` — Payment amount and currency
-- `status` — `PENDING`, `SUCCEEDED`, `FAILED`, etc.
+Stores coupon rules and redemption limits.
 
-Example: This table records whether payment for Order #101 succeeded.
-
-### 5.9 `coupons`
-
-| Column | Type | Rule |
+| Column | Type | Constraint / Purpose |
 |---|---|---|
 | `id` | UUID | Primary key |
-| `code` | VARCHAR(50) | UNIQUE |
-| `discount_type` | VARCHAR(20) | `PERCENTAGE`, `FIXED` |
-| `discount_value` | BIGINT | `> 0` |
-| `max_redemptions` | INTEGER | `> 0` |
-| `redeemed_count` | INTEGER | `>= 0` |
-| `starts_at` | TIMESTAMPTZ | NOT NULL |
-| `expires_at` | TIMESTAMPTZ | NOT NULL |
-| `status` | VARCHAR(20) | `ACTIVE`, `INACTIVE` |
+| `code` | VARCHAR(50) | `UNIQUE`, `NOT NULL` |
+| `discount_type` | VARCHAR(20) | `PERCENTAGE` or `FIXED`; `NOT NULL` |
+| `discount_value` | BIGINT | `NOT NULL`, `CHECK (discount_value > 0)` |
+| `max_redemptions` | INTEGER | `NOT NULL`, `CHECK (max_redemptions > 0)` |
+| `redeemed_count` | INTEGER | `NOT NULL`, `CHECK (redeemed_count >= 0)` |
+| `starts_at` | TIMESTAMPTZ | `NOT NULL` |
+| `expires_at` | TIMESTAMPTZ | `NOT NULL` |
+| `status` | VARCHAR(20) | `ACTIVE` or `INACTIVE`; `NOT NULL` |
 
-Purpose: Stores discount coupon rules and validity.
+During checkout, the application must validate the coupon's dates, status, discount rules, and redemption limit. Transactional validation is required when many redemptions can happen concurrently.
 
-- `code` — Coupon code, such as `SAVE10`
-- `discount_type` — Percentage or fixed discount
-- `discount_value` — Discount amount
-- `max_redemptions`, `redeemed_count` — Usage limit and current usage count
-- `starts_at`, `expires_at` — When the coupon becomes valid and expires
+#### 5.4.10 `coupon_redemptions`
 
-Example: A customer can receive a 10% discount using the `SAVE10` coupon if all coupon rules are satisfied.
+Tracks coupon usage or temporary reservations.
 
-### 5.10 `coupon_redemptions`
-
-| Column | Type | Rule |
+| Column | Type | Constraint / Purpose |
 |---|---|---|
 | `id` | UUID | Primary key |
-| `coupon_id` | UUID | FK → `coupons.id` |
-| `user_id` | UUID | FK → `users.id` |
-| `order_id` | UUID | FK → `orders.id` |
-| `status` | VARCHAR(20) | `RESERVED`, `REDEEMED`, `RELEASED` |
-| `created_at` | TIMESTAMPTZ | NOT NULL |
+| `coupon_id` | UUID | Foreign key referencing `coupons.id`, `NOT NULL` |
+| `user_id` | UUID | Foreign key referencing `users.id`, `NOT NULL` |
+| `order_id` | UUID | Foreign key referencing `orders.id`, `NOT NULL` |
+| `status` | VARCHAR(20) | `RESERVED`, `REDEEMED`, or `RELEASED`; `NOT NULL` |
+| `created_at` | TIMESTAMPTZ | `NOT NULL` |
 
-Depending on the policy, `UNIQUE(coupon_id, user_id)` or `UNIQUE(order_id)` can be used.
+Depending on coupon policy, use a unique constraint on `(coupon_id, user_id)` to limit a user to one redemption. Use a unique constraint on `order_id` if multiple redemption records per order are not allowed. The correct constraint depends on the business rules.
 
-Purpose: Tracks which coupon a user used for which order and the current redemption status.
+#### 5.4.11 `stock_reservations`
 
-- `coupon_id` — Identifies the coupon
-- `user_id` — Identifies the customer
-- `order_id` — Identifies the order
-- `status` — `RESERVED`, `REDEEMED`, or `RELEASED`
+Stores the lifecycle and expiration deadline of a stock reservation.
 
-Example: A coupon is reserved during checkout. After successful payment, it is redeemed according to policy; if checkout expires, it can be released.
-
-### 5.11 `stock_reservations`
-
-| Column | Type | Rule |
+| Column | Type | Constraint / Purpose |
 |---|---|---|
 | `id` | UUID | Primary key |
-| `order_id` | UUID | FK → `orders.id`, UNIQUE |
-| `status` | VARCHAR(20) | `ACTIVE`, `CONFIRMED`, `RELEASED`, `EXPIRED` |
-| `expires_at` | TIMESTAMPTZ | NOT NULL |
-| `created_at` | TIMESTAMPTZ | NOT NULL |
-| `updated_at` | TIMESTAMPTZ | NOT NULL |
+| `order_id` | UUID | Foreign key referencing `orders.id`, `UNIQUE`, `NOT NULL` |
+| `status` | VARCHAR(20) | `ACTIVE`, `CONFIRMED`, `RELEASED`, or `EXPIRED`; `NOT NULL` |
+| `expires_at` | TIMESTAMPTZ | `NOT NULL` |
+| `created_at` | TIMESTAMPTZ | `NOT NULL` |
+| `updated_at` | TIMESTAMPTZ | `NOT NULL` |
 
-Purpose: Stores how long stock is held for an order and the current reservation status.
+A background worker can use the reservation deadline to find expired unpaid orders and release stock safely.
 
-- `order_id` — Identifies the order associated with the reservation
-- `status` — `ACTIVE`, `CONFIRMED`, `RELEASED`, or `EXPIRED`
-- `expires_at` — Reservation deadline
+#### 5.4.12 `stock_reservation_items`
 
-Example: Stock is held for 10 minutes while the customer completes payment. The reservation can expire after that period.
+Stores the quantity of each product reserved in a reservation.
 
-### 5.12 `stock_reservation_items`
-
-| Column | Type | Rule |
+| Column | Type | Constraint / Purpose |
 |---|---|---|
-| `reservation_id` | UUID | FK → `stock_reservations.id` |
-| `product_id` | UUID | FK → `products.id` |
-| `quantity` | INTEGER | `> 0` |
+| `reservation_id` | UUID | Foreign key referencing `stock_reservations.id` |
+| `product_id` | UUID | Foreign key referencing `products.id` |
+| `quantity` | INTEGER | `NOT NULL`, `CHECK (quantity > 0)` |
 
 **Primary key:** `(reservation_id, product_id)`.
 
-Purpose: Stores how much stock of each product is held in a reservation.
+#### 5.4.13 `payment_webhook_events`
 
-- `reservation_id` — Identifies the reservation
-- `product_id` — Identifies the product
-- `quantity` — Number of reserved units
+Stores events received from the payment gateway and their processing state.
 
-Example: One reservation contains 2 shirts and 1 headphone.
-
-### 5.13 `payment_webhook_events`
-
-| Column | Type | Rule |
+| Column | Type | Constraint / Purpose |
 |---|---|---|
 | `id` | UUID | Primary key |
-| `provider` | VARCHAR(40) | NOT NULL |
-| `event_id` | VARCHAR(255) | NOT NULL |
-| `event_type` | VARCHAR(80) | NOT NULL |
-| `status` | VARCHAR(20) | `RECEIVED`, `PROCESSED`, `FAILED` |
-| `received_at` | TIMESTAMPTZ | NOT NULL |
-| `processed_at` | TIMESTAMPTZ | Nullable |
+| `provider` | VARCHAR(40) | Gateway name, `NOT NULL` |
+| `event_id` | VARCHAR(255) | Provider event identifier, `NOT NULL` |
+| `event_type` | VARCHAR(80) | Event category, `NOT NULL` |
+| `status` | VARCHAR(20) | `RECEIVED`, `PROCESSED`, or `FAILED`; `NOT NULL` |
+| `received_at` | TIMESTAMPTZ | `NOT NULL` |
+| `processed_at` | TIMESTAMPTZ | Nullable until processed |
 
-**Constraint:** `UNIQUE(provider, event_id)`.
+**Constraint:** `UNIQUE (provider, event_id)`.
 
-Purpose: Stores records of webhook events received from the payment gateway to prevent duplicate event processing and track processing status.
+Verify the webhook signature before trusting the event. Persist and deduplicate the event before processing the state transition safely. Duplicate webhooks must not repeat the same payment or order-fulfillment action.
 
-- `provider` — Gateway name
-- `event_id` — Unique gateway event ID
-- `event_type` — Type of event
-- `status` — `RECEIVED`, `PROCESSED`, or `FAILED`
-- `received_at`, `processed_at` — Times when the event was received and processed
+#### 5.4.14 `outbox_events`
 
-Example: If the gateway sends the same payment-success webhook twice, the unique `(provider, event_id)` constraint helps prevent duplicate event processing.
+Stores events that must be published after a transaction commits.
 
-### 5.14 `outbox_events`
-
-| Column | Type | Rule |
+| Column | Type | Constraint / Purpose |
 |---|---|---|
 | `id` | UUID | Primary key |
-| `aggregate_type` | VARCHAR(50) | For example, `ORDER` |
-| `aggregate_id` | UUID | NOT NULL |
-| `event_type` | VARCHAR(80) | NOT NULL |
-| `payload` | JSONB | NOT NULL |
-| `published_at` | TIMESTAMPTZ | Nullable |
-| `created_at` | TIMESTAMPTZ | NOT NULL |
+| `aggregate_type` | VARCHAR(50) | For example, `ORDER`; `NOT NULL` |
+| `aggregate_id` | UUID | Related order or entity ID, `NOT NULL` |
+| `event_type` | VARCHAR(80) | Event category, `NOT NULL` |
+| `payload` | JSONB | Event data, `NOT NULL` |
+| `published_at` | TIMESTAMPTZ | Nullable until published |
+| `created_at` | TIMESTAMPTZ | `NOT NULL` |
 
-Purpose: Reliably stores events associated with the database transactions of orders or payments so that a worker can process them later.
+Write the outbox event in the same transaction as the business state change. A background worker can publish the event and mark it as published. Since event delivery may happen more than once, consumers must also be idempotent.
 
-- `aggregate_type` — For example, `ORDER`
-- `aggregate_id` — Related order ID
-- `event_type` — What happened
-- `payload` — Event data
-- `published_at` — Whether the event has been published
+#### 5.4.15 `shipments`
 
-Example: After an order is created, a notification event is stored in the outbox. A worker later publishes it to the queue.
+Stores delivery and tracking information.
 
-### 5.15 `shipments`
-
-| Column | Type | Rule |
+| Column | Type | Constraint / Purpose |
 |---|---|---|
 | `id` | UUID | Primary key |
-| `order_id` | UUID | FK → `orders.id` |
-| `carrier` | VARCHAR(80) | NOT NULL |
-| `tracking_number` | VARCHAR(120) | UNIQUE |
-| `status` | VARCHAR(30) | Delivery status |
-| `created_at` | TIMESTAMPTZ | NOT NULL |
-| `updated_at` | TIMESTAMPTZ | NOT NULL |
+| `order_id` | UUID | Foreign key referencing `orders.id`, `NOT NULL` |
+| `carrier` | VARCHAR(80) | Courier or delivery provider, `NOT NULL` |
+| `tracking_number` | VARCHAR(120) | Unique when present |
+| `status` | VARCHAR(30) | Delivery lifecycle status, `NOT NULL` |
+| `created_at` | TIMESTAMPTZ | `NOT NULL` |
+| `updated_at` | TIMESTAMPTZ | `NOT NULL` |
 
-Purpose: Stores delivery and tracking information for orders.
+An order may have multiple shipment records if it is split into multiple deliveries. If only one shipment per order is allowed, add a unique constraint on `shipments.order_id`.
 
-- `order_id` — Identifies the order being shipped
-- `carrier` — Courier or delivery provider
-- `tracking_number` — Delivery tracking number
-- `status` — Current delivery status
+### 5.5 Defining Relationships
 
-Example: When an order is marked `SHIPPED`, the customer can use the tracking number to monitor delivery progress.
+After identifying entities and attributes, define the relationships between them. Use foreign keys to represent relationships and junction tables to resolve many-to-many relationships.
 
-### Important Indexes
+#### 5.5.1 Types of Relationships
 
-- `orders(user_id, created_at DESC)`
-- `order_items(order_id)`
-- `products(seller_id, status)`
-- `stock_reservations(status, expires_at)`
-- `payments(order_id)`
-- `payment_webhook_events(provider, event_id)`
-- `coupons(code)`
+- **One-to-One (1:1):** A record is associated with at most one record in another table.
+- **One-to-Many (1:N):** A record can be associated with multiple records in another table.
+- **Many-to-Many (M:N):** Multiple records on either side can be associated with each other. A junction table is generally required.
+
+#### 5.5.2 E-commerce System Relationships
+
+| Relationship | Type | Implementation |
+|---|---|---|
+| User → Products (as seller) | 1:N | `products.seller_id` |
+| User → Carts | 1:N over time | `carts.user_id` |
+| Cart → Cart Items | 1:N | `cart_items.cart_id` |
+| Product → Cart Items | 1:N | `cart_items.product_id` |
+| Product → Inventory | 1:1 in this design | `inventory.product_id` is the primary key |
+| User → Orders | 1:N | `orders.user_id` |
+| Order → Order Items | 1:N | `order_items.order_id` |
+| Product → Order Items | 1:N | `order_items.product_id` |
+| Order → Payments | 1:N | `payments.order_id` |
+| Order → Stock Reservation | 1:1 in this design | Unique `stock_reservations.order_id` |
+| Stock Reservation → Reservation Items | 1:N | `stock_reservation_items.reservation_id` |
+| Product → Reservation Items | 1:N | `stock_reservation_items.product_id` |
+| Coupon → Coupon Redemptions | 1:N | `coupon_redemptions.coupon_id` |
+| User → Coupon Redemptions | 1:N | `coupon_redemptions.user_id` |
+| Order → Coupon Redemption | 1:0..1 in this design | `coupon_redemptions.order_id`, depending on policy |
+| Order → Shipments | 1:N when split shipping is supported | `shipments.order_id` |
+| Payment Provider → Webhook Events | 1:N | Provider and event identifier |
+| Order / Aggregate → Outbox Events | 1:N | `outbox_events.aggregate_type`, `aggregate_id` |
+
+#### 5.5.3 Why Are Junction Tables Needed?
+
+A cart can contain multiple products, and the same product can appear in many customers' carts. Therefore, the relationship between `carts` and `products` is many-to-many; `cart_items` resolves this relationship.
+
+Similarly, an order can contain multiple products, and a product can appear in many orders. `order_items` resolves this relationship and stores each order line's quantity and price snapshot.
+
+Example:
+
+**`orders`**
+
+| `id` | `user_id` | `status` |
+|---|---|---|
+| `O101` | `U101` | `PENDING_PAYMENT` |
+
+**`order_items`**
+
+| `order_id` | `product_id` | `quantity` | `unit_price_minor` |
+|---|---|---:|---:|
+| `O101` | `P201` | 2 | 50000 |
+| `O101` | `P305` | 1 | 120000 |
+
+With BDT stored in minor units (poisha), the two order lines total BDT 2,200. There are two order lines, but only one order.
+
+### 5.6 Data Integrity, Constraints, and Indexes
+
+Database constraints help protect important business rules even when many application requests execute simultaneously.
+
+Recommended constraints:
+
+- A primary key for every table.
+- Foreign keys for entity relationships.
+- `NOT NULL` for required attributes.
+- `CHECK (quantity > 0)` for cart, order, and reservation quantities.
+- `CHECK (available_qty >= 0 AND reserved_qty >= 0)` for inventory.
+- Unique constraints for email, coupon code, idempotency keys, and provider event identifiers, according to the business rules.
+- `UNIQUE (cart_id, product_id)` on `cart_items`.
+- `UNIQUE (user_id, idempotency_key)` on `orders`.
+- `UNIQUE (provider, event_id)` on `payment_webhook_events`.
+- If `inventory.product_id` is the primary key, it is automatically unique.
+
+Create indexes based on query patterns. Potentially useful indexes include:
+
+- `products(status, created_at)` — active product listings.
+- `products(seller_id, created_at)` — seller dashboard.
+- `orders(user_id, created_at)` — customer order history.
+- `orders(status, created_at)` — order-processing worker.
+- `payments(order_id, created_at)` — payment history.
+- `stock_reservations(status, expires_at)` — reservation expiry worker.
+- `outbox_events(published_at, created_at)` — finding unpublished events.
+
+Foreign-key columns may also need indexes to support joins and foreign-key checks. Validate indexes using query plans and workloads representative of production; avoid creating unnecessary indexes.
+
+### 5.7 Transactions and Concurrency Control
+
+A database transaction groups multiple operations so that either all succeed or all are rolled back. During checkout, validate current product prices and statuses, reserve stock, create the order and order items, create reservation records, and write any required outbox event within a transaction.
+
+### High-Level Safe Checkout Flow
+
+1. Receive the checkout request with an idempotency key.
+2. If the same key and payload have already been processed, return the previous result.
+3. Start a database transaction.
+4. Lock the relevant inventory rows in a consistent order, or use conditional atomic updates.
+5. Validate product status and sufficient available stock.
+6. Atomically decrease available stock and increase reserved stock.
+7. Create the order, order items, and reservation records.
+8. If required, write the outbox event in the same transaction.
+9. Commit the transaction.
+10. Start payment through a safe payment-attempt flow.
+
+Do not keep a database transaction open while waiting for a customer or an external payment gateway. After receiving a verified successful payment result, revalidate the order and reservation state inside a transaction before confirming the order and finalizing stock. When a reservation expires or payment fails, verify that it is still eligible for release before releasing it. If money is collected after the reservation expires and the order cannot be fulfilled, start a safe refund workflow.
+
+### 5.8 Key Database Design Decisions
+
+| Decision | Reason |
+|---|---|
+| Use PostgreSQL as the source of truth. | It provides transactions, constraints, and row-level locking for order and inventory operations. |
+| Separate `products` and `inventory`. | Product information and stock operations have different responsibilities and update patterns. |
+| Store price and name snapshots in `order_items`. | Seller product updates do not change historical orders. |
+| Use idempotency keys during checkout. | Prevents duplicate orders caused by retries. |
+| Store stock reservations with expiry times. | Makes reserved inventory explicit and allows it to expire safely. |
+| Deduplicate webhook events. | Prevents duplicate gateway notifications from repeating the same business action. |
+| Use a transactional outbox. | Reduces the risk of losing an asynchronous event after the database state commits. |
+| Normalize transactional data first. | Reduces unnecessary duplication and helps preserve data integrity. |
+| Add caches and denormalized read models based on measurements. | Improves read performance without compromising authoritative stock allocation. |
+
 
 ## 6. ER Diagram
 
