@@ -612,81 +612,6 @@ The Outbox Worker later runs ticket PDF/QR generation and notification processin
 
 On the other hand, if the payment is not completed within 10 minutes, the Expiry Worker, within a transaction, makes the booking `EXPIRED` and releases the `HELD` seats of that booking by making them `AVAILABLE`. Even if a payment success event arrives later, the expired booking is not directly confirmed; a refund or reconciliation workflow is run according to policy.
 
-#### Summarized Table for Quick Reference ( Interview Answer )
-
-Junior Software Engineer · Easy–Medium System Design
-
-## Step-by-step workflow
-
-##### step: 1\. Passenger → React / Next.js
-
-The Passenger will select the train, journey date and seats and send a booking request. Just because a seat is shown as Available in the frontend does not mean it is definitely available, because concurrent bookings can happen.
-
-##### step: 2\. Frontend → HTTPS / TLS 1.3 → API Gateway
-
-The Frontend will send a `POST /api/bookings` request. HTTPS will encrypt the data. I will use an `Idempotency-Key` to prevent duplicate bookings from retry or double-click.
-
-##### step: 3\. API Gateway → Authentication & Validation
-
-I will do Authentication with JWT/Session and request validation. Rate limiting and routing can also be here.
-
-##### step: 4\. API Gateway → Booking Service → PostgreSQL
-
-The Booking Service will verify seat availability using a transaction and row locking (`SELECT ... FOR UPDATE`) or a conditional update. If all requested seats are available, it will make them `HELD` and create a `PENDING_PAYMENT` booking, whose expiry is 10 minutes. Unique constraints will prevent double allocation. If any seat is not found, I will roll back the entire transaction and give `409 Conflict`.
-
-Expiry Worker: A Cron/Queue Worker will make an expired booking `EXPIRED` and make the related held seats `AVAILABLE`. I will keep concurrent expiry processing safe with row locking and conditional state transition.
-
-##### step: 5\. Booking Service → Payment Service
-
-The Payment Service will verify the booking's amount and create an `INITIATED` Payment Record. The Booking Service will manage the seat/booking and the Payment Service will manage the payment.
-
-##### step: 6\. Payment Service → External Payment Gateway
-
-The Backend will initiate payment at a Gateway like bKash/SSLCommerz and give checkout information to the Frontend. I will not assume payment is successful just by seeing the success page.
-
-##### step: 7\. Payment Gateway → Idempotent Webhook Handler
-
-The Gateway will send a payment notification. I will verify the signature/authenticity and store the event in the database. I will prevent duplicate processing from duplicate webhooks using a unique `event_id` and idempotency.
-
-##### step: 8\. Webhook Handler → Payment Service
-
-The Payment Service will verify the status, transaction reference, amount and currency according to the Gateway's rules. If successful, the payment will become `SUCCEEDED`. If the status is uncertain, I will do reconciliation.
-
-##### step: 9\. Payment Service → Booking Service
-
-I will send the verified payment success event to the Booking Service. I will re-verify whether the booking is still `PENDING_PAYMENT`, seat ownership is correct and the hold is valid. If the hold has expired and the seat has gone to another booking, I will not confirm the booking; if the payment has been charged, I will start the `REFUND_PENDING` workflow.
-
-##### step: 10\. Booking Service → PostgreSQL Primary Database
-
-In one transaction, I will make the booking `CONFIRMED`, the seats `BOOKED`, and create the Ticket Record and `outbox_events`. If all succeed, `COMMIT`, otherwise `ROLLBACK`.
-
-ACID is important here:
-
-- Atomicity (everything will happen, or nothing will): All the work of one transaction will succeed, otherwise no work will be saved.
-Example: During ticket booking, the seat was booked, but the payment record was not saved. If the transaction rolls back, the seat booking will also be cancelled.
-- Consistency (Database rules will remain correct): After every transaction, the database's rules must remain correct.
-Example: If a train has 40 seats, the 41st booking cannot be made.
-- Isolation (No problem even when working together): Even if multiple users book at the same time, the database will not allow a wrong result.
-Example: Even if two people request the same seat together, only one will get the seat.
-- Durability (Once saved, it stays): Once a transaction is successfully committed, the data will remain stored in the database, even if the server restarts.
-Example: Even if the server shuts down after the ticket booking is successful, the booking data will not be lost.
-
-##### step: 11\. Ticket / Notification Service → SMS / Email Gateway
-
-The Outbox Worker will process the event and create the Ticket PDF/QR and send notification. If it fails, it will retry; a confirmed booking will not be cancelled due to notification failure.
-
-##### step: 12\. SMS / Email Gateway → Passenger
-
-The Passenger will receive the confirmation and ticket details. The ticket can be viewed from `My Bookings` and its validity can be verified in the backend with the QR/Ticket ID.
-
-**Simple end-to-end story:** The user searches for a train and selects four seats.
-The Frontend sends a booking request to the API. The Backend locks the
-four seats in a PostgreSQL transaction, gives them `HELD` status and creates
-a 10-minute `PENDING_PAYMENT` booking. If the payment is successful and
-verified, the booking becomes `CONFIRMED` and the seats become `BOOKED`. If
-there is no payment, the expiry worker expires the booking and releases the
-seats.
-
 
 #### Isn't Payment happening before Booking?
 ##### Arrow flow
@@ -1063,139 +988,494 @@ idempotency, retry and reconciliation workers are still needed.
 
 ## 4. Database Design
 
-Eight main tables:
+### 1. Understanding the Requirements
 
-1.  `users`
-2.  `trains`
-3.  `trips`
-4.  `trip_seats`
-5.  `bookings`
-6.  `booking_seats`
-7.  `payments`
-8.  `tickets`
+Before creating database tables, we must understand the business requirements. Database design should start with the problem, not with the tables.
 
-### 4.1 `users`
+#### 1.1 Understand the Problem
 
-Keeps user account information.
+Suppose a passenger wants to travel from Dhaka to Jashore and book four seats together: `A1`, `A2`, `A3`, and `A4`.
 
-  Column         Type              Description
-  -------------- ----------------- -------------------
-  `id`           UUID, PK          Unique user ID
-  `name`         VARCHAR           User's name
-  `email`        VARCHAR, UNIQUE   User's email
-  `created_at`   TIMESTAMPTZ       Account creation time
+The system must:
 
-### 4.2 `trains`
+1. Store users, trains, routes, trips, and seat information.
+2. Allow passengers to search for available trips.
+3. Reserve multiple seats under one booking.
+4. Hold selected seats for a maximum of 10 minutes.
+5. Record payment attempts and verify payment results.
+6. Confirm bookings only after validating payment and reservation eligibility.
+7. Release seats when unpaid bookings expire.
+8. Prevent the same trip seat from being confirmed for two passengers.
+9. Handle duplicate webhooks, delayed payment notifications, and failed payments.
+10. Generate tickets for confirmed bookings.
+11. Support cancellation and refund workflows.
 
-Keeps the general information of trains.
+#### 1.2 Identify the Business Rules
 
-  Column           Type              Description
-  ---------------- ----------------- -----------------
-  `id`             UUID, PK          Unique train ID
-  `train_number`   VARCHAR, UNIQUE   Train number
-  `train_name`     VARCHAR           Train name
+Business rules define what the database must protect.
 
-### 4.3 `trips`
+| Rule | Database Design Implication |
+|---|---|
+| A user can make multiple bookings. | `bookings.user_id` references `users.id`. |
+| A train can operate multiple trips. | `trips.train_id` references `trains.id`. |
+| Each trip has its own seat inventory. | `trip_seats` stores seats for individual trips. |
+| A booking can contain multiple seats. | Use a junction table named `booking_seats`. |
+| A trip seat must not belong to two bookings simultaneously. | Use transactional seat allocation and database constraints. |
+| A booking has a payment deadline. | Store `expires_at` in `bookings`. |
+| One booking can have multiple payment attempts. | Use a one-to-many relationship between `bookings` and `payments`. |
+| A gateway transaction must not be processed twice. | Enforce unique gateway transaction references and webhook event identifiers. |
+| A ticket belongs to a booking. | `tickets.booking_id` references `bookings.id`. |
+| A ticket can only be issued for a confirmed booking. | Enforce this rule in the booking/ticket workflow, with appropriate database safeguards. |
 
-The journey of a train on a specific date and time is called a trip. For
-different dates of the same train, there will be different trip records.
+**Important:** A database schema is not just a collection of tables. It is a representation of the business rules that the system must preserve.
 
-  Column                Type          Description
-  --------------------- ------------- -----------------------
-  `id`                  UUID, PK      Unique trip ID
-  `train_id`            UUID, FK      `trains.id` reference
-  `departure_station`   VARCHAR       Station where the journey starts
-  `arrival_station`     VARCHAR       Destination station
-  `departure_time`      TIMESTAMPTZ   Departure date/time
-  `arrival_time`        TIMESTAMPTZ   Arrival date/time
+---
 
-### 4.4 `trip_seats`
+### 2. Identify the Entities
 
-Keeps the availability of each seat of a specific trip. The same physical
-seat can be available separately on another trip.
+An entity represents a distinct business object about which the system needs to store information.
 
-  Column              Type                Description
-  ------------------- ------------------- ---------------------------
-  `id`                UUID, PK            Unique trip-seat ID
-  `trip_id`           UUID, FK            `trips.id` reference
-  `seat_number`       VARCHAR             e.g. `A1`, `A2`
-  `status`            VARCHAR/ENUM        Seat status
-  `hold_expires_at`   TIMESTAMPTZ, NULL   Hold deadline
-  `booking_id`        UUID, NULL, FK      Current hold/booking owner
-  `fare`              DECIMAL             Seat fare
+We should identify entities from the requirements before defining their columns.
 
-**Constraint:** `UNIQUE (trip_id, seat_number)` must be kept.
+#### 2.1 Entity Identification
 
-### 4.5 `bookings`
+| Entity | Why Is It Needed? |
+|---|---|
+| `users` | Stores passenger account information. |
+| `stations` | Stores reusable railway station information. |
+| `trains` | Stores train details. |
+| `trips` | Represents a particular train journey on a specific date and time. |
+| `trip_stops` | Stores intermediate stops, arrival/departure times, and stop order. |
+| `trip_seats` | Stores the seat inventory and availability for each trip. |
+| `bookings` | Represents a passenger's reservation request. |
+| `booking_seats` | Connects a booking to its selected seats. |
+| `payments` | Stores payment attempts and their outcomes. |
+| `payment_events` | Tracks gateway webhook events and their processing status. |
+| `tickets` | Stores issued travel tickets. |
+| `refunds` | Tracks refund requests and refund outcomes. |
+| `outbox_events` | Stores events that must be published after a database transaction commits. |
 
-Keeps the booking's overall state, user, total amount and expiry deadline.
+#### 2.2 Why Do We Need Both `trains` and `trips`?
 
-  Column           Type           Description
-  ---------------- -------------- -----------------------------
-  `id`             UUID, PK       Unique booking ID
-  `user_id`        UUID, FK       `users.id` reference
-  `trip_id`        UUID, FK       `trips.id` reference
-  `status`         VARCHAR/ENUM   Booking lifecycle status
-  `total_amount`   DECIMAL        Total fare of the selected seats
-  `expires_at`     TIMESTAMPTZ    10-minute deadline
-  `created_at`     TIMESTAMPTZ    Booking creation time
+A train and a trip represent different concepts.
 
-### 4.6 `booking_seats`
+For example:
 
-Links multiple seats to one booking. For four seats, **one booking row and
-four `booking_seats` rows** will be created.
+- Train: Train 725, named Sundarban Express.
+- Trip 1: Train 725 departing on October 27, 2026.
+- Trip 2: Train 725 departing on October 28, 2026.
 
-  Column           Type          Description
-  ---------------- ------------- ----------------------------------
-  `booking_id`     UUID, PK/FK   `bookings.id` reference
-  `trip_seat_id`   UUID, PK/FK   `trip_seats.id` reference
-  `fare`           DECIMAL       Seat fare saved at the time of booking
+The train's identity remains the same, but each journey has its own schedule and seat inventory.
 
-Composite primary key: `PRIMARY KEY (booking_id, trip_seat_id)`.
+Therefore:
 
-Apart from this, the rule that the same trip-seat is not assigned to more
-than one active booking must be ensured through database constraints and
-allocation logic.
+- `trains` stores relatively stable train information.
+- `trips` stores individual scheduled journeys.
+- `trip_seats` stores the inventory for each journey.
 
-### 4.7 `payments`
+This separation prevents us from mixing train information with date-specific booking information.
 
-Keeps the payment attempt and the result of the gateway transaction.
+#### 2.3 Why Do We Need `trip_seats`?
 
-  --------------------------------------------------------------------------
-  Column                     Type                    Description
-  -------------------------- ----------------------- -----------------------
-  `id`                       UUID, PK                Unique payment ID
+Suppose physical seat `A1` exists on Train 725.
 
-  `booking_id`               UUID, FK                `bookings.id` reference
+The system must track whether `A1` is available on the October 27 trip independently of its availability on the October 28 trip.
 
-  `gateway_transaction_id`   VARCHAR, UNIQUE         Gateway transaction
-                                                     reference
+Therefore, the logical identity of a bookable seat is:
 
-  `amount`                   DECIMAL                 Payment amount
+`(trip_id, seat_number)`
 
-  `status`                   VARCHAR/ENUM            Payment status
+We enforce this using:
 
-  `created_at`               TIMESTAMPTZ             Payment attempt
-                                                     creation time
-  --------------------------------------------------------------------------
+`UNIQUE (trip_id, seat_number)`
 
-For one booking, there can be multiple payment attempts as needed.
-Gateway transactions and events must be processed idempotently.
+This allows the same seat number to exist across different trips without creating a conflict.
 
-### 4.8 `tickets`
+---
 
-Keeps the information for issuing a ticket for a confirmed booking after
-payment is verified.
+### 3. Normalization vs. Denormalization
 
-Column           Type              Description
---------------   ----------------  ------------------------------
-`id`             UUID, PK          Unique ticket ID
-`booking_id`     UUID, FK          `bookings.id` reference
-`ticket_number`  VARCHAR, UNIQUE   Public ticket number
-`status`         VARCHAR/ENUM      Ticket lifecycle status
-`issued_at`      TIMESTAMPTZ       Time the ticket was issued
+Normalization organizes data to reduce unnecessary duplication and prevent update, insertion, and deletion anomalies.
 
-A ticket can be issued only after verified payment and a `CONFIRMED` booking.
+We should normalize the transactional database first and introduce denormalization only when a measured performance requirement justifies it.
+
+#### 3.1 First Normal Form (1NF)
+
+**Rule:** Each column should contain a single logical value, and repeating groups should be represented as separate rows.
+
+Suppose we store four seats in a single booking row:
+
+| booking_id | user_id | seats |
+|---|---|---|
+| B101 | U101 | A1, A2, A3, A4 |
+
+This design makes it difficult to enforce seat-level constraints, join individual seats, or safely allocate inventory.
+
+A normalized design separates the booking from its selected seats.
+
+`bookings`
+
+| id | user_id | status |
+|---|---|---|
+| B101 | U101 | PENDING_PAYMENT |
+
+`booking_seats`
+
+| booking_id | trip_seat_id |
+|---|---|
+| B101 | TS101 |
+| B101 | TS102 |
+| B101 | TS103 |
+| B101 | TS104 |
+
+Now each row represents one booking-seat association.
+
+#### 3.2 Second Normal Form (2NF)
+
+**Rule:** The table must satisfy 1NF, and every non-key attribute must depend on the entire candidate key, not just part of a composite key.
+
+Consider:
+
+`booking_seats(booking_id, trip_seat_id, passenger_name, train_name)`
+
+Suppose the primary key is `(booking_id, trip_seat_id)`.
+
+If `train_name` depends only on the trip, rather than the complete composite key, storing it repeatedly in `booking_seats` introduces unnecessary duplication.
+
+Instead:
+
+- Store train information in `trains`.
+- Store trip information in `trips`.
+- Store booking-to-seat associations in `booking_seats`.
+
+For the proposed schema, `booking_seats` uses the composite primary key `(booking_id, trip_seat_id)` and stores the fare applicable to that specific booking-seat association.
+
+#### 3.3 Third Normal Form (3NF)
+
+**Rule:** The table must satisfy 2NF, and non-key attributes should not depend transitively on other non-key attributes.
+
+Consider this table:
+
+| trip_id | train_id | train_name | departure_station |
+|---|---|---|---|
+| TR101 | T101 | Sundarban Express | Dhaka |
+
+If `train_name` depends on `train_id`, storing it in every trip row duplicates train information.
+
+Instead:
+
+`trains`
+
+| id | train_name |
+|---|---|
+| T101 | Sundarban Express |
+
+`trips`
+
+| id | train_id | departure_station |
+|---|---|---|
+| TR101 | T101 | Dhaka |
+
+The `train_id` foreign key connects the two tables.
+
+This reduces duplication and prevents a train name from becoming inconsistent across multiple trip records.
+
+#### 3.4 Why Should We Store `fare` in Both `trip_seats` and `booking_seats`?
+
+These columns represent different business meanings.
+
+- `trip_seats.fare`: The current fare for that seat on that trip.
+- `booking_seats.fare`: A snapshot of the fare accepted when the booking was created.
+
+Suppose seat `A1` costs 800 BDT when the passenger makes a booking. Later, the operator changes the fare to 900 BDT.
+
+The existing booking should still use the original 800 BDT fare.
+
+Therefore, storing the accepted fare in `booking_seats` is intentional historical duplication, not an accidental normalization error.
+
+#### 3.5 When Should We Use Denormalization?
+
+Denormalization intentionally duplicates or precomputes data to improve read performance.
+
+Potential examples include:
+
+- A cached count of available seats.
+- A precomputed trip search result.
+- A reporting table containing daily booking totals.
+
+However, the authoritative seat inventory must remain consistent with the booking system.
+
+For this project:
+
+- Use normalized PostgreSQL tables for transactional data.
+- Use indexes to optimize common queries.
+- Add caching or read models only when performance measurements justify them.
+- Never use an independently updated availability cache as the final authority for allocating seats.
+
+---
+
+### 4. Define Attributes
+
+Attributes describe the properties of an entity.
+
+For each attribute, determine:
+
+1. What information does it represent?
+2. Which data type should store it?
+3. Can it be `NULL`?
+4. Is it unique?
+5. Does it reference another entity?
+6. Does it need a default value or validation constraint?
+
+#### 4.1 `users`
+
+Stores passenger account information.
+
+| Attribute | Data Type | Constraint / Purpose |
+|---|---|---|
+| `id` | UUID | Primary key |
+| `name` | VARCHAR(100) | Required |
+| `email` | VARCHAR(255) | Unique, required |
+| `created_at` | TIMESTAMPTZ | Required, defaults to current time |
+
+#### 4.2 `stations`
+
+Stores reusable railway station information.
+
+| Attribute | Data Type | Constraint / Purpose |
+|---|---|---|
+| `id` | UUID | Primary key |
+| `code` | VARCHAR(20) | Unique station code |
+| `name` | VARCHAR(150) | Required station name |
+
+#### 4.3 `trains`
+
+Stores train information.
+
+| Attribute | Data Type | Constraint / Purpose |
+|---|---|---|
+| `id` | UUID | Primary key |
+| `train_number` | VARCHAR(30) | Unique train number |
+| `train_name` | VARCHAR(150) | Required |
+
+#### 4.4 `trips`
+
+Stores individual scheduled journeys.
+
+| Attribute | Data Type | Constraint / Purpose |
+|---|---|---|
+| `id` | UUID | Primary key |
+| `train_id` | UUID | Foreign key to `trains.id` |
+| `departure_station_id` | UUID | Foreign key to `stations.id` |
+| `arrival_station_id` | UUID | Foreign key to `stations.id` |
+| `departure_time` | TIMESTAMPTZ | Required |
+| `arrival_time` | TIMESTAMPTZ | Required |
+| `status` | VARCHAR | Scheduled, cancelled, completed, etc. |
+
+#### 4.5 `trip_stops`
+
+Stores intermediate stops in a journey.
+
+| Attribute | Data Type | Constraint / Purpose |
+|---|---|---|
+| `trip_id` | UUID | Part of composite primary key; foreign key |
+| `station_id` | UUID | Foreign key to `stations.id` |
+| `stop_sequence` | INTEGER | Part of composite primary key |
+| `arrival_time` | TIMESTAMPTZ | Nullable for the initial stop |
+| `departure_time` | TIMESTAMPTZ | Nullable for the final stop |
+
+Composite primary key: `(trip_id, stop_sequence)`.
+
+A suitable uniqueness constraint on `(trip_id, station_id)` can prevent the same station from appearing more than once on a trip, if that matches the railway's business rules.
+
+#### 4.6 `trip_seats`
+
+Stores the seat inventory for each trip.
+
+| Attribute | Data Type | Constraint / Purpose |
+|---|---|---|
+| `id` | UUID | Primary key |
+| `trip_id` | UUID | Foreign key to `trips.id` |
+| `seat_number` | VARCHAR(20) | Required |
+| `fare` | NUMERIC(12,2) | Non-negative fare |
+| `status` | VARCHAR | `AVAILABLE`, `HELD`, `BOOKED`, `BLOCKED` |
+| `booking_id` | UUID | Nullable foreign key to `bookings.id` |
+| `hold_expires_at` | TIMESTAMPTZ | Nullable hold deadline |
+
+Constraint: `UNIQUE (trip_id, seat_number)`.
+
+#### 4.7 `bookings`
+
+Stores the overall reservation.
+
+| Attribute | Data Type | Constraint / Purpose |
+|---|---|---|
+| `id` | UUID | Primary key |
+| `user_id` | UUID | Foreign key to `users.id` |
+| `trip_id` | UUID | Foreign key to `trips.id` |
+| `status` | VARCHAR | Booking lifecycle status |
+| `total_amount` | NUMERIC(12,2) | Non-negative total |
+| `expires_at` | TIMESTAMPTZ | Hold deadline |
+| `idempotency_key` | VARCHAR(100) | Prevents duplicate booking creation for the same request |
+| `created_at` | TIMESTAMPTZ | Creation timestamp |
+| `updated_at` | TIMESTAMPTZ | Last update timestamp |
+
+A suitable unique constraint on `(user_id, idempotency_key)` prevents the same user from accidentally creating duplicate bookings when retrying a request with the same idempotency key.
+
+#### 4.8 `booking_seats`
+
+Connects a booking with its selected seats.
+
+| Attribute | Data Type | Constraint / Purpose |
+|---|---|---|
+| `booking_id` | UUID | Foreign key and part of composite primary key |
+| `trip_seat_id` | UUID | Foreign key and part of composite primary key |
+| `fare` | NUMERIC(12,2) | Fare snapshot at booking time |
+
+Composite primary key: `(booking_id, trip_seat_id)`.
+
+A unique constraint on `trip_seat_id` in this table is intentionally **not** used, because expired or cancelled bookings must retain their historical seat associations.
+
+Instead, the current seat allocation is controlled through `trip_seats.booking_id`, the seat status, row locking, and transactional validation.
+
+#### 4.9 `payments`
+
+Stores payment attempts.
+
+| Attribute | Data Type | Constraint / Purpose |
+|---|---|---|
+| `id` | UUID | Primary key |
+| `booking_id` | UUID | Foreign key to `bookings.id` |
+| `gateway_transaction_id` | VARCHAR(150) | Unique when provided |
+| `idempotency_key` | VARCHAR(100) | Unique key for creating a payment attempt safely |
+| `amount` | NUMERIC(12,2) | Non-negative |
+| `currency` | CHAR(3) | Currency code, e.g. BDT |
+| `status` | VARCHAR | Payment lifecycle status |
+| `created_at` | TIMESTAMPTZ | Creation timestamp |
+| `updated_at` | TIMESTAMPTZ | Last update timestamp |
+
+One booking can have multiple payment attempts. The system must prevent the total amount collected across successful attempts from exceeding the amount owed.
+
+#### 4.10 `payment_events`
+
+Stores incoming payment gateway webhook events.
+
+| Attribute | Data Type | Constraint / Purpose |
+|---|---|---|
+| `id` | UUID | Primary key |
+| `gateway_event_id` | VARCHAR(200) | Unique gateway event identifier |
+| `payment_id` | UUID | Foreign key to `payments.id` |
+| `event_type` | VARCHAR(100) | Event category |
+| `processing_status` | VARCHAR | `RECEIVED`, `PROCESSED`, `FAILED` |
+| `received_at` | TIMESTAMPTZ | Receipt timestamp |
+| `processed_at` | TIMESTAMPTZ | Nullable processing timestamp |
+
+The unique gateway event identifier prevents the same webhook event from being processed repeatedly.
+
+#### 4.11 `tickets`
+
+Stores issued tickets.
+
+| Attribute | Data Type | Constraint / Purpose |
+|---|---|---|
+| `id` | UUID | Primary key |
+| `booking_id` | UUID | Foreign key to `bookings.id` |
+| `ticket_number` | VARCHAR(100) | Unique ticket number |
+| `status` | VARCHAR | `ISSUED`, `USED`, `CANCELLED` |
+| `issued_at` | TIMESTAMPTZ | Ticket issue timestamp |
+
+For this design, one ticket record represents one booking's ticket document. The individual passenger or seat details can be retrieved through `booking_seats`.
+
+If the business requires a separate ticket for each passenger, the ticket model should instead associate each ticket with the relevant booking-seat or passenger record.
+
+#### 4.12 `refunds`
+
+Stores refund attempts and outcomes.
+
+| Attribute | Data Type | Constraint / Purpose |
+|---|---|---|
+| `id` | UUID | Primary key |
+| `payment_id` | UUID | Foreign key to `payments.id` |
+| `gateway_refund_id` | VARCHAR(150) | Unique when provided |
+| `amount` | NUMERIC(12,2) | Positive refund amount |
+| `status` | VARCHAR | `PENDING`, `SUCCEEDED`, `FAILED` |
+| `created_at` | TIMESTAMPTZ | Creation timestamp |
+
+#### 4.13 `outbox_events`
+
+Stores events that need to be published after a transaction commits.
+
+| Attribute | Data Type | Constraint / Purpose |
+|---|---|---|
+| `id` | UUID | Primary key |
+| `event_type` | VARCHAR(100) | Event category |
+| `aggregate_id` | UUID | Related booking or other entity |
+| `payload` | JSONB | Event data |
+| `created_at` | TIMESTAMPTZ | Creation timestamp |
+| `published_at` | TIMESTAMPTZ | Nullable publication timestamp |
+
+The outbox pattern prevents a committed booking confirmation from being lost simply because the application crashes before publishing a ticket-generation or notification event.
+
+---
+
+### 5. Define Relationships
+
+After identifying entities and attributes, determine how the entities are connected.
+
+#### 5.1 Relationship Types
+
+- **One-to-One (1:1):** One record is associated with at most one record in another table.
+- **One-to-Many (1:N):** One record can be associated with multiple records in another table.
+- **Many-to-Many (M:N):** Multiple records on both sides can be associated with one another. This usually requires a junction table.
+
+#### 5.2 Relationships in the Train Booking System
+
+| Relationship | Type | Implementation |
+|---|---|---|
+| User → Bookings | 1:N | `bookings.user_id` |
+| Train → Trips | 1:N | `trips.train_id` |
+| Station → Departure Trips | 1:N | `trips.departure_station_id` |
+| Station → Arrival Trips | 1:N | `trips.arrival_station_id` |
+| Trip → Trip Stops | 1:N | `trip_stops.trip_id` |
+| Station → Trip Stops | 1:N | `trip_stops.station_id` |
+| Trip → Trip Seats | 1:N | `trip_seats.trip_id` |
+| Trip → Bookings | 1:N | `bookings.trip_id` |
+| Booking → Booking Seats | 1:N | `booking_seats.booking_id` |
+| Trip Seat → Booking Seat History | 1:N over time | `booking_seats.trip_seat_id` |
+| Booking → Payments | 1:N | `payments.booking_id` |
+| Payment → Payment Events | 1:N | `payment_events.payment_id` |
+| Booking → Ticket | 1:1 for this design | Unique `tickets.booking_id` |
+| Payment → Refunds | 1:N | `refunds.payment_id` |
+
+#### 5.3 Why Do We Need a Junction Table?
+
+A booking can contain multiple seats, and a seat can appear in the historical records of multiple bookings over time.
+
+Therefore, the relationship between bookings and trip seats is logically many-to-many over the history of the system.
+
+We represent it using `booking_seats`.
+
+Example:
+
+`bookings`
+
+| id | user_id | status |
+|---|---|---|
+| B101 | U101 | PENDING_PAYMENT |
+
+`booking_seats`
+
+| booking_id | trip_seat_id | fare |
+|---|---|---:|
+| B101 | TS101 | 800.00 |
+| B101 | TS102 | 800.00 |
+| B101 | TS103 | 800.00 |
+| B101 | TS104 | 800.00 |
+
+The total amount is 3,200 BDT.
+
+The booking contains four seat associations but remains one booking.
+
 
 ## 5. Status Management
 
@@ -1273,58 +1553,81 @@ policy and seat ownership.
 ## 6. ER Diagram
 
 ``` mermaid
+
 erDiagram
-    USERS ||--o{ BOOKINGS : "creates"
-    TRAINS ||--o{ TRIPS : "operates"
-    TRIPS ||--o{ TRIP_SEATS : "contains"
-    TRIPS ||--o{ BOOKINGS : "receives"
-    
-    BOOKINGS ||--|{ BOOKING_SEATS : "includes"
-    TRIP_SEATS ||--|{ BOOKING_SEATS : "references"
-    
-    BOOKINGS ||--o{ PAYMENTS : "has"
-    BOOKINGS ||--o{ TICKETS : "issues"
+    USERS ||--o{ BOOKINGS : creates
+    TRAINS ||--o{ TRIPS : operates
+
+    STATIONS ||--o{ TRIPS : departure
+    STATIONS ||--o{ TRIPS : arrival
+
+    TRIPS ||--o{ TRIP_STOPS : contains
+    STATIONS ||--o{ TRIP_STOPS : identifies
+
+    TRIPS ||--o{ TRIP_SEATS : contains
+    TRIPS ||--o{ BOOKINGS : receives
+
+    BOOKINGS ||--o{ BOOKING_SEATS : includes
+    TRIP_SEATS ||--o{ BOOKING_SEATS : history
+
+    BOOKINGS ||--o{ PAYMENTS : has
+    PAYMENTS ||--o{ PAYMENT_EVENTS : receives
+    BOOKINGS ||--o| TICKETS : issues
+    PAYMENTS ||--o{ REFUNDS : may_have
+
+    BOOKINGS ||--o{ OUTBOX_EVENTS : generates
 
     USERS {
         uuid id PK
-        string name
-        string email UK
-        datetime created_at
+        varchar name
+        varchar email UK
     }
 
     TRAINS {
         uuid id PK
-        string train_number UK
-        string train_name
+        varchar train_number UK
+        varchar train_name
+    }
+
+    STATIONS {
+        uuid id PK
+        varchar code UK
+        varchar name
     }
 
     TRIPS {
         uuid id PK
         uuid train_id FK
-        string departure_station
-        string arrival_station
-        datetime departure_time
-        datetime arrival_time
+        uuid departure_station_id FK
+        uuid arrival_station_id FK
+        timestamptz departure_time
+        timestamptz arrival_time
+    }
+
+    TRIP_STOPS {
+        uuid trip_id PK,FK
+        integer stop_sequence PK
+        uuid station_id FK
     }
 
     TRIP_SEATS {
         uuid id PK
         uuid trip_id FK
-        string seat_number
-        string status
-        datetime hold_expires_at
-        uuid booking_id FK
+        varchar seat_number
         decimal fare
+        varchar status
+        uuid booking_id FK
+        timestamptz hold_expires_at
     }
 
     BOOKINGS {
         uuid id PK
         uuid user_id FK
         uuid trip_id FK
-        string status
+        varchar status
         decimal total_amount
-        datetime expires_at
-        datetime created_at
+        timestamptz expires_at
+        varchar idempotency_key
     }
 
     BOOKING_SEATS {
@@ -1336,18 +1639,38 @@ erDiagram
     PAYMENTS {
         uuid id PK
         uuid booking_id FK
-        string gateway_transaction_id UK
+        varchar gateway_transaction_id UK
         decimal amount
-        string status
-        datetime created_at
+        varchar status
+    }
+
+    PAYMENT_EVENTS {
+        uuid id PK
+        varchar gateway_event_id UK
+        uuid payment_id FK
+        varchar processing_status
     }
 
     TICKETS {
         uuid id PK
-        uuid booking_id FK
-        string ticket_number UK
-        string status
-        datetime issued_at
+        uuid booking_id FK,UK
+        varchar ticket_number UK
+        varchar status
+    }
+
+    REFUNDS {
+        uuid id PK
+        uuid payment_id FK
+        varchar gateway_refund_id UK
+        decimal amount
+        varchar status
+    }
+
+    OUTBOX_EVENTS {
+        uuid id PK
+        varchar event_type
+        uuid aggregate_id
+        jsonb payload
     }
 ```
 **Relationship summary:**
@@ -1366,33 +1689,257 @@ defined, so that there is no duplicate allocation.
 
 ## 7. REST API Design
 
-The following REST APIs support passenger authentication, train search, seat booking, payment processing, and ticket verification.
+### 1. Identify the Actors
+
+An actor is a user or external system that interacts with the application.
+
+| Actor | Responsibility |
+|---|---|
+| Passenger | Searches trips, selects seats, makes payments, and manages bookings. |
+| Payment Gateway | Processes payments and sends payment notifications. |
+| Ticket Inspector | Verifies issued tickets and QR codes. |
+| Background Worker | Expires unpaid bookings and releases eligible seat holds. |
+| Administrator | Manages trains, trips, schedules, and seat inventory. |
+
+### 2. Identify the Resources
+
+Based on the requirements defined in the Problem Statement, identify the main resources that the API needs to expose.
+
+| Resource | Purpose |
+|---|---|
+| Auth | Passenger authentication |
+| Trips | Scheduled train journeys |
+| Seats | Seat inventory and availability for a trip |
+| Bookings | Passenger reservations |
+| Payments | Payment attempts and results |
+| Tickets | Issued travel tickets |
+| Refunds | Refund requests and outcomes |
+
+**Important:** A train represents the train itself, whereas a trip represents a specific scheduled journey. Therefore, trip search and seat availability should be associated with a particular trip.
+
+### 3. Convert Requirements into API Operations
+
+For each requirement identified in the Problem Statement, determine:
+
+1. Which resource is involved?
+2. What operation does the client need to perform?
+3. Which HTTP method is appropriate?
+4. What data must the client send?
+5. What response should the server return?
+6. What validation, authorization, and failure handling are required?
+
+#### 3.1 Search Trips
+
+- Resource: Trips
+- Operation: Retrieve matching trips
+- HTTP method: `GET`
+
+Endpoint:
+
+`GET /api/trips?from=DHAKA&to=JASHORE&date=2026-10-27`
+
+Returns matching trips, schedules, fares, and relevant availability information.
+
+#### 3.2 Check Seat Availability
+
+- Resource: Seats
+- Operation: Retrieve seat availability
+- HTTP method: `GET`
+
+Endpoint:
+
+`GET /api/trips/:tripId/seats`
+
+Returns seat numbers, current availability, and fares.
+
+Seat availability is informational. The booking operation must validate and allocate seats atomically because availability may change between requests.
+
+#### 3.3 Create a Booking
+
+- Resource: Bookings
+- Operation: Create a booking and hold the selected seats
+- HTTP method: `POST`
+
+Endpoint:
+
+`POST /api/bookings`
+
+Request:
+
+```json
+{
+  "tripId": "trip-101",
+  "seatIds": [
+    "seat-A1",
+    "seat-A2",
+    "seat-A3",
+    "seat-A4"
+  ]
+}
+```
+
+The backend validates the request, calculates the total fare, and holds all requested seats within a database transaction.
+
+A successful response uses `201 Created` and includes the booking ID, booking status, total amount, currency, and server-generated expiry timestamp.
+
+The client may send an `Idempotency-Key` header to prevent duplicate bookings when retrying the same request.
+
+#### 3.4 Initiate Payment
+
+- Resource: Payments
+- Operation: Create a payment attempt
+- HTTP method: `POST`
+
+Endpoint:
+
+`POST /api/bookings/:bookingId/payments`
+
+The backend verifies booking ownership and payment eligibility before initiating the payment gateway process.
+
+Initiating payment does not confirm the booking.
+
+#### 3.5 Process Payment Notifications
+
+- Resource: Payment Events
+- Operation: Receive a gateway notification
+- HTTP method: `POST`
+
+Endpoint:
+
+`POST /api/payments/webhook`
+
+The backend verifies the gateway signature, validates the payment details, and deduplicates repeated events.
+
+Before confirming a booking, it must verify the payment result, booking eligibility, expiry policy, and seat ownership.
+
+#### 3.6 Retrieve Booking Details
+
+- Resource: Bookings
+- Operation: Retrieve a booking
+- HTTP method: `GET`
+
+Endpoint:
+
+`GET /api/bookings/:bookingId`
+
+The backend returns the authorized passenger's booking details, status, selected seats, and relevant payment or ticket information.
+
+#### 3.7 Cancel a Booking
+
+- Resource: Bookings
+- Operation: Request cancellation
+- HTTP method: `POST`
+
+Endpoint:
+
+`POST /api/bookings/:bookingId/cancel`
+
+The backend checks ownership, booking status, and cancellation eligibility before processing the request.
+
+Cancellation and refund completion must be tracked separately.
+
+#### 3.8 Retrieve Refund Status
+
+- Resource: Refunds
+- Operation: Retrieve refund information
+- HTTP method: `GET`
+
+Endpoint:
+
+`GET /api/refunds/:refundId`
+
+Returns the refund status to an authorized requester.
+
+#### 3.9 Verify a Ticket
+
+- Resource: Tickets
+- Operation: Verify a ticket
+- HTTP method: `POST`
+
+Endpoint:
+
+`POST /api/tickets/:ticketNumber/verify`
+
+The backend verifies the ticket's validity and usage status. Appropriate inspector authorization is required.
+
+### 4. Choose the Correct HTTP Method
+
+| HTTP Method | Purpose | Example |
+|---|---|---|
+| `GET` | Retrieve data | `GET /api/bookings/:bookingId` |
+| `POST` | Create a resource or initiate an operation | `POST /api/bookings` |
+| `PUT` | Replace a resource representation | `PUT /api/admin/trips/:tripId` |
+| `PATCH` | Partially update a resource | `PATCH /api/admin/trips/:tripId` |
+| `DELETE` | Delete a resource when deletion is appropriate | `DELETE /api/admin/drafts/:draftId` |
+
+Booking cancellation should generally be an explicit business operation rather than deleting the booking record.
+
+`GET` requests should not initiate payments, hold seats, or perform other state-changing operations.
+
+### 5. Define Request and Response Contracts
+
+For each endpoint, define the request structure, successful response, validation rules, and possible errors.
+
+Example: `POST /api/bookings`
+
+Successful response — `201 Created`:
+
+```json
+{
+  "bookingId": "booking-101",
+  "status": "PENDING_PAYMENT",
+  "totalAmount": 3200.00,
+  "currency": "BDT",
+  "expiresAt": "2026-10-27T10:10:00Z",
+  "seats": ["A1", "A2", "A3", "A4"]
+}
+```
+
+Common HTTP status codes:
+
+| Status | Purpose |
+|---|---|
+| `400 Bad Request` | Malformed request or invalid request structure |
+| `401 Unauthorized` | Authentication is missing or invalid |
+| `403 Forbidden` | The caller lacks permission |
+| `404 Not Found` | Requested resource does not exist or is not accessible |
+| `409 Conflict` | Request conflicts with the current resource state |
+| `422 Unprocessable Content` | Valid request structure but a business rule is violated |
+| `500 Internal Server Error` | Unexpected server-side failure |
+
+Use a consistent error response structure:
+
+```json
+{
+  "error": {
+    "code": "SEAT_UNAVAILABLE",
+    "message": "One or more selected seats are no longer available."
+  }
+}
+```
+
+### 6. Complete REST API Endpoint List
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/api/auth/login` | Passenger login |
-| `GET` | `/api/trains` | Search trains |
+| `POST` | `/api/auth/login` | Authenticate a passenger |
+| `GET` | `/api/trips` | Search trips |
+| `GET` | `/api/trips/:tripId` | Retrieve trip details |
 | `GET` | `/api/trips/:tripId/seats` | Check seat availability |
-| `POST` | `/api/bookings` | Create booking and hold seats temporarily |
-| `GET` | `/api/bookings/:id` | Get booking details and status |
-| `POST` | `/api/bookings/:id/payment` | Initiate payment |
-| `GET` | `/api/bookings/:id/payment-status` | Check payment status |
+| `POST` | `/api/bookings` | Create a booking and hold seats |
+| `GET` | `/api/bookings/:bookingId` | Retrieve booking details |
+| `GET` | `/api/bookings` | Retrieve the passenger's booking history |
+| `POST` | `/api/bookings/:bookingId/payments` | Initiate a payment attempt |
+| `GET` | `/api/bookings/:bookingId/payments` | Retrieve payment attempts |
 | `POST` | `/api/payments/webhook` | Receive payment gateway notifications |
-| `POST` | `/api/bookings/:id/cancel` | Request booking cancellation |
-| `GET` | `/api/tickets/:ticketNumber` | Retrieve ticket details |
-| `GET` | `/api/bookings` | View passenger booking history |
-| `POST` | `/api/tickets/:ticketNumber/verify` | Verify ticket or QR code |
+| `POST` | `/api/bookings/:bookingId/cancel` | Request booking cancellation |
+| `GET` | `/api/tickets/:ticketNumber` | Retrieve authorized ticket details |
+| `POST` | `/api/tickets/:ticketNumber/verify` | Verify a ticket |
+| `GET` | `/api/refunds/:refundId` | Retrieve refund status |
 
-### Important API Design Considerations
+Administrative endpoints can be added for managing stations, trains, trips, schedules, and seat inventory.
 
-- **Authentication:** Protect passenger-specific endpoints using JWT or session-based authentication.
-- **Seat Availability:** Revalidate seat availability during booking to prevent double booking.
-- **Idempotency:** Use idempotency keys for booking and payment initiation to handle duplicate requests safely.
-- **Payment Verification:** Verify payment status on the backend using the payment gateway's supported verification mechanism. Never trust the frontend success redirect alone.
-- **Webhook Security:** Validate webhook authenticity and process duplicate events idempotently.
-- **ACID Transactions:** Use PostgreSQL transactions, appropriate row locking, and database constraints to maintain booking and seat consistency.
-- **Background Workers:** Use background jobs to expire unpaid seat holds, process refunds, and reconcile uncertain payment statuses. These workers do not need public REST endpoints.
-
+The background worker responsible for expiring bookings is an internal process and does not need a public passenger endpoint.
 
 ## 8. Complete Booking Flow
 
