@@ -2,13 +2,59 @@
 
 Dhaka Tesla Pool হলো Dhaka-ভিত্তিক full-stack ride-pooling system। এটি compatible zone-এর মধ্যে fixed-capacity Tesla ride ভাগ করে এবং passenger booking, driver matching, fare, payment, ১০ মিনিটের ticket hold, coin reward ও ride lifecycle পরিচালনা করে।
 
-## Live Deployment
+## Table of Contents
 
-- Frontend: https://frontend-dhaka-tesla-pool.vercel.app
-- Backend: https://backend-dhaka-tesla-pool.vercel.app
-- Health check: https://backend-dhaka-tesla-pool.vercel.app/health
-
-The frontend and backend are deployed as separate Vercel projects. PostgreSQL is hosted separately and is accessed by Prisma from the backend function.
+- [Zones & Matching Rule](#zones--matching-rule)
+- [Features](#features)
+  - [মূল সুবিধা](#মূল-সুবিধা)
+  - [Implementation status](#implementation-status)
+- [Architecture](#architecture)
+  - [১. Frontend Architecture](#১-frontend-architecture)
+  - [২. Backend Architecture](#২-backend-architecture)
+  - [৩. Full System Architecture](#৩-full-system-architecture)
+  - [Arrow Follow](#arrow-follow)
+  - [Problem and solve](#problem-and-solve)
+  - [Request এবং matching flow](#request-এবং-matching-flow)
+  - [Ticket booking এবং ১০ মিনিটের hold flow](#ticket-booking-এবং-১০-মিনিটের-hold-flow)
+  - [ACID transaction নীতি](#acid-transaction-নীতি)
+  - [Payment এবং refund state machine](#payment-এবং-refund-state-machine)
+  - [Idempotency এবং webhook security](#idempotency-এবং-webhook-security)
+  - [Coin job](#coin-job)
+  - [Ride Lifecycle](#ride-lifecycle)
+- [Database Design / ERD (বাংলা নকশা)](#database-design--erd-বাংলা-নকশা)
+  - [7.1 Problem Statement](#71-problem-statement)
+  - [7.2 Entity Identification](#72-entity-identification)
+  - [7.3 Relationship Design](#73-relationship-design)
+  - [7.4 ER Diagram](#74-er-diagram)
+  - [7.5 Database Constraints & Integrity](#75-database-constraints--integrity)
+  - [7.6 Transaction & Concurrency Control](#76-transaction--concurrency-control)
+  - [ডেটাবেস rules এবং data integrity](#ডেটাবেস-rules-এবং-data-integrity)
+  - [প্রয়োজনীয় index ও enum](#প্রয়োজনীয়-index-ও-enum)
+  - [Applications](#applications)
+  - [Project Structure](#project-structure)
+- [API Overview (বাংলা contract)](#api-overview-বাংলা-contract)
+  - [Authentication](#authentication)
+  - [Passenger and ride routes](#passenger-and-ride-routes)
+  - [Driver routes](#driver-routes)
+  - [Pool routes](#pool-routes)
+  - [Ticket booking এবং hold routes](#ticket-booking-এবং-hold-routes)
+  - [Payment routes](#payment-routes)
+  - [Coin routes](#coin-routes)
+  - [Internal job routes](#internal-job-routes)
+  - [Scheduled worker এবং Vercel caveat](#scheduled-worker-এবং-vercel-caveat)
+  - [Booking response-এর উদাহরণ](#booking-response-এর-উদাহরণ)
+  - [Proposed webhook contract](#proposed-webhook-contract)
+- [Demo Data](#demo-data)
+- [Known Limitations & Next Improvements](#known-limitations--next-improvements)
+- [Troubleshooting](#troubleshooting)
+  - [CORS error in the browser](#cors-error-in-the-browser)
+  - [`FUNCTION_INVOCATION_FAILED`](#function_invocation_failed)
+  - [Vercel cannot find the project](#vercel-cannot-find-the-project)
+  - [Database is unavailable](#database-is-unavailable)
+- [Fare Model](#fare-model)
+- [Design and Domain Decisions](#design-and-domain-decisions)
+- [AI Usage](#ai-usage)
+  - [AI Tool: Google Antigravity](#ai-tool-google-antigravity)
 
 ## Zones & Matching Rule
 
@@ -140,7 +186,9 @@ flowchart LR
   Queue --> Worker
   API --> Logs[Audit logs and monitoring]
 ```
-### Arrow Follow 
+
+### Arrow Follow
+
 ```mermaid
 flowchart TB
 
@@ -247,104 +295,100 @@ flowchart TB
 ```
 
 #### step 1: Passenger ride request পাঠান
+
 Passenger pickup location, destination এবং প্রয়োজনীয় ride preference নির্বাচন করেন। Next.js frontend POST /api/rides request Express API-তে পাঠায়।
 
-
-
 #### step 2:Authentication ও validation হয়
+
 Backend JWT, user permission, request data এবং idempotency key যাচাই করে। Invalid request হলে এখানেই reject হয়।
 
-
-
 #### step 3: Pool matching হয়
+
 Pool Matcher compatible pool খোঁজে। Route compatibility, detour, waiting time এবং available capacity বিবেচনা করে।
 
-
-
 #### step 4: Fare calculate ও seat hold করা হয়
+
 Fare Calculator server-side fare নির্ধারণ করে। PostgreSQL transaction-এর মধ্যে capacity যাচাই করে seat hold তৈরি করা হয়। Concurrent request থাকলে atomic update, row lock বা উপযুক্ত isolation ব্যবহার করতে হবে।
 
-
-
 #### step 5:Payment initiate হয়
+
 Payment Service external gateway-তে payment তৈরি করে। Payment pending থাকাকালে seat hold নির্দিষ্ট সময় পর্যন্ত বজায় থাকে।
 
-
-
 #### step 6:Webhook verify করা হয়
+
 Gateway callback-এর signature, payment reference, amount এবং transaction status যাচাই করা হয়। Idempotency নিশ্চিত করে একই callback দ্বিতীয়বার এলে duplicate credit বা confirmation আটকানো হয়।
 
-
-
 #### step 7:Booking confirm হয়
+
 Confirmation Service যাচাই করে payment সফল এবং hold এখনও বৈধ কি না। এরপর PostgreSQL transaction-এ booking state ও সংশ্লিষ্ট record commit করা হয়।
 
-
-
 #### step 8:Notification পাঠানো হয়
+
 একই transaction-এ booking update এবং outbox record persist করা হয়। Publisher committed event queue-তে পাঠায়; worker notification service-কে trigger করে।
 
-
-
 #### step 9:Failure হলে recovery হয়
+
 Payment ব্যর্থ হলে বা hold expire হলে worker booking ও payment status যাচাই করে প্রয়োজন অনুযায়ী hold release করে। Payment gateway এবং local database-এর status mismatch হলে reconciliation worker তা resolve করে।
 
 **Full flow-এর সারাংশ:** Passenger বা driver frontend থেকে request পাঠায়, backend transaction দিয়ে pool-এর seat hold করে, payment gateway payment নেয়, webhook booking confirm করে এবং worker expiry বা coin reward process করে। PostgreSQL booking, seat, payment এবং coin-এর একমাত্র সত্য উৎস।
+
 ### Problem and solve
+
 #### ১. Race Condition — একই Seat দুইজন Book করতে চাইলে
+
 সমাধান:
 1. Database transaction-এর মধ্যে seat availability check করব।
 2. Atomic update বা row locking ব্যবহার করে seat allocate করব।
 3. একজন seat পাবে, অন্যজন 409 Conflict পাবে।
 মূল কথা: Overbooking প্রতিরোধ করব।
+
 #### ২. Duplicate Payment Callback
+
 সমাধান:
 1. Payment gateway-এর webhook signature verify করব।
 2. Unique payment reference ও idempotency ব্যবহার করব।
 3. একই callback আবার এলে দ্বিতীয়বার টাকা credit করব না।
 মূল কথা: Duplicate payment processing প্রতিরোধ করব।
+
 #### ৩. Payment Success, কিন্তু Booking Failure
+
 সমাধান:
 1. Payment ও booking-এর status আলাদাভাবে track করব।
 2. Payment সফল হলে booking confirm করার চেষ্টা করব।
 3. Booking সম্ভব না হলে recovery workflow চালাব এবং প্রয়োজন হলে refund করব।
 মূল কথা: Payment ও booking-এর consistency বজায় রাখব।
+
 #### ৪. Server Crash — Response হারিয়ে গেলে
+
 সমাধান:
 1. প্রতিটি booking request-এর জন্য idempotency key ব্যবহার করব।
 2. Database-এ request-এর result সংরক্ষণ করব।
 3. একই request আবার এলে নতুন booking না বানিয়ে আগের result ফেরত দেব।
 মূল কথা: Duplicate booking প্রতিরোধ করব।
+
 #### ৫. Hold Expiry — Payment না করলে Seat Release
+
 সমাধান:
 1. Seat hold-এর সঙ্গে expiry time সংরক্ষণ করব।
 2. Scheduler ও background worker দিয়ে expired hold খুঁজব।
 3. Booking ও payment status যাচাই করে seat release করব।
 মূল কথা: Unused seat অন্য passenger-এর জন্য available করব।
+
 #### ৬. Notification Failure — SMS না গেলে
+
 সমাধান:
 1. Booking confirmation ও outbox event একই database transaction-এ সংরক্ষণ করব।
 2. Background worker দিয়ে notification পাঠাব।
 3. ব্যর্থ হলে retry করব; notification failure-এর কারণে booking rollback করব না।
 মূল কথা: Booking নিশ্চিত থাকবে, notification পরে পাঠানো হবে।
+
 #### ৭. Scaling — অনেক User একসঙ্গে Request করলে
+
 সমাধান:
 1. Load balancer দিয়ে request একাধিক API server-এ ভাগ করব।
 2. Database query, index ও connection pooling optimize করব।
 3. Background task queue-তে পাঠাব এবং monitoring দিয়ে bottleneck শনাক্ত করব।
 মূল কথা: বেশি traffic সামলাব এবং system-এর performance বজায় রাখব।
-
-### বাংলা পূর্ণ আর্কিটেকচার
-
-**Frontend:** Next.js App Router-এর passenger ও driver dashboard, booking form, ১০ মিনিটের countdown, payment screen, booking status, coin balance/reward history এবং retry-safe API client থাকবে। Frontend শুধু coin job-এর ফলাফল দেখাবে; coin যোগ করার job frontend-এ চলবে না। Countdown শুধু UI feedback; hold-এর আসল expiry সবসময় server-এর `expiresAt` দিয়ে যাচাই হবে।
-
-**Backend:** Express API-তে Auth/RBAC, request validation, booking, matching, fare, payment, coin এবং ride-state service আলাদা থাকবে। Controller সরাসরি balance বা seat update করবে না; domain service transaction-এর মধ্যে সেই কাজ করবে।
-
-**Database:** PostgreSQL হলো source of truth। Fare/coin/poysha integer হিসেবে রাখা হবে। Provider-scoped payment ID, webhook event ID, operation-scoped idempotency key, `TicketBooking.bookingCode` এবং coin reward reference duplicate request ঠেকাবে।
-
-**External integration:** Payment gateway-তে authorization/charge পাঠানোর আগে local payment intent তৈরি হবে। Gateway webhook signature যাচাই করে idempotentভাবে payment update করবে; browser redirect কখনও payment success-এর source of truth নয়।
-
-**Worker:** প্রতি এক মিনিটে `EXPIRED` হওয়ার সময় পার হওয়া `HELD` booking lock করে seat release করবে। `RIDE_COMPLETED` event থেকে `CoinJob` তৈরি করে reward হিসাব, wallet balance এবং `CoinLedger` একই transaction-এ update করবে। Job পুনরায় চললেও unique key-এর কারণে duplicate coin হবে না।
 
 Preview-safe architecture map:
 
@@ -641,7 +685,6 @@ Dhaka Tesla Pool একটি ride-pooling platform, যেখানে এক�
 | `COIN_JOB` | Coin reward processing, retry ও completion status |
 
 ### 7.3 Relationship Design
-
 
 এই section-এ Dhaka Tesla Pool-এর প্রতিটি database table-এর উদ্দেশ্য, গুরুত্বপূর্ণ columns, constraints এবং সংশ্লিষ্ট business logic ব্যাখ্যা করা হয়েছে। Column names বিদ্যমান ER Diagram-এর সঙ্গে সামঞ্জস্য রেখে রাখা হয়েছে।
 
@@ -970,7 +1013,6 @@ Dhaka Tesla Pool একটি ride-pooling platform, যেখানে এক�
 - একটি User একাধিক Coin Job পেতে পারে।
 
 **Design Note:** Worker Crash করলে Lease Expire হওয়ার পরে Job পুনরায় Process করা যেতে পারে। Coin Ledger-এর Unique Business Reference ও Idempotency Key Duplicate Reward প্রতিরোধে সহায়তা করবে।
-
 
 | Relationship | Type | ব্যাখ্যা |
 |---|---|---|
@@ -1301,8 +1343,6 @@ frontend/
 docker-compose.yml         Local PostgreSQL, backend, and frontend services
 ```
 
-
-
 ## API Overview (বাংলা contract)
 
 সব application route `/api` দিয়ে শুরু হবে। এই README-তে source verification না থাকায় endpoint-গুলো **Proposed**, যতক্ষণ না route/service/test দিয়ে যাচাই করা হয়। Protected request-এ JWT, resource ownership check এবং write request-এ operation-scoped `Idempotency-Key` ব্যবহার করতে হবে।
@@ -1472,8 +1512,6 @@ Without pooling, the discount is zero, so the same fares would be `17,000` and `
 - JWT keeps authentication stateless for the MVP.
 - The current matching algorithm is intentionally limited to compatible predefined corridors.
 
-
-
 ## AI Usage
 
 ### AI Tool: Google Antigravity
@@ -1488,4 +1526,3 @@ Google Antigravity was used as an AI engineering and development tool for:
 - documentation and README assistance
 
 The developer reviewed and tested the resulting work and remains responsible for understanding the implementation, validating behavior, and making final engineering decisions.
-
