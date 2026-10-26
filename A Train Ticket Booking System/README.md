@@ -2258,7 +2258,7 @@ Use the following workflow when designing any critical feature.
 6. **Plan recovery:** Decide how uncertain or failed operations can be retried or reconciled.
 7. **Test the scenario:** Verify the behavior using concurrent requests, duplicate events, and injected failures.
 
-## 8. Complete Booking Flow
+## 9. Complete Booking Flow
 
 ``` mermaid
 flowchart TD
@@ -2285,7 +2285,7 @@ done only after taking the row lock within the transaction. If the
 requirement is that four seats be booked together, then the booking cannot
 be confirmed by reserving two or three seats and leaving out the rest.
 
-## 9. Double Booking Prevention
+## 10. Double Booking Prevention
 
 Suppose User A and User B want to book seat `A1` at the same time.
 
@@ -2476,9 +2476,9 @@ It changes the booking status from PENDING to EXPIRED or CANCELLED.
 
 It makes the status of the related seats AVAILABLE, so that other passengers at the station or in the app can buy the seat within moments.
 
-## 10. 10-Minute Hold and Expiry Mechanism
+## 11. 10-Minute Hold and Expiry Mechanism
 
-### 10.1 When a booking is created
+### 11.1 When a booking is created
 
 Suppose:
 
@@ -2499,7 +2499,7 @@ expiresAt = databaseCurrentTime + 10 minutes
 The frontend can show a countdown, but the frontend is not the authority of
 the timer. The Backend and database will enforce expiry.
 
-### 10.2 Background Expiry Worker
+### 11.2 Background Expiry Worker
 
 The worker will look for bookings whose deadline has passed at regular
 intervals:
@@ -2534,7 +2534,7 @@ instances process the same booking, row locking/claiming and conditional
 state transition must be used. The worker may run late, so the API will also
 enforce the expiry rule.
 
-### 10.3 Timeline
+### 11.3 Timeline
 
   -----------------------------------------------------------------------
   Time                                 Event
@@ -2555,7 +2555,7 @@ enforce the expiry rule.
 The payment gateway and database are separate systems. So the race condition
 between payment outcome verification and the expiry worker must be handled.
 
-## 11. Payment Failure and Delayed Webhook
+## 12. Payment Failure and Delayed Webhook
 
 ### Problem: Late Webhook Arrival & Cron Job Race Condition Situation:
 
@@ -2600,7 +2600,7 @@ What happens: Due to network problems, the payment gateway may send the same web
 
 Why and how: The system checks the unique ID (event_id) of each web hook. If it sees that work has already been done once with this ID, it does not do things like deducting money or refunding a second time and just sends a simple 200 OK response.
 
-## 12. Database Transaction
+## 13. Database Transaction
 
 Illustrative transaction to reserve four seats:
 
@@ -2624,7 +2624,7 @@ payment will be initiated outside the transaction. When payment is verified,
 the booking will be confirmed and the seats made `BOOKED` in a second
 transaction---but following reservation validity and payment policy.
 
-## 13. ACID Properties
+## 14. ACID Properties
 
 ACID are the four important properties of a database transaction:
 
@@ -2633,7 +2633,7 @@ ACID are the four important properties of a database transaction:
 -   **I --- Isolation**
 -   **D --- Durability**
 
-### 13.1 Atomicity --- Everything will happen, or nothing will
+### 14.1 Atomicity --- Everything will happen, or nothing will
 
 If `A4` among the four seats is unavailable, `A1`, `A2`, `A3` cannot be kept
 reserved. The entire transaction will roll back.
@@ -2653,7 +2653,7 @@ COMMIT;   -- if all operations succeed
 **Interview answer:** "Atomicity ensures that all four seats are
 reserved together, or none of them are reserved."
 
-### 13.2 Consistency --- Database rules will remain correct
+### 14.2 Consistency --- Database rules will remain correct
 
 Before and after every transaction, database constraints and business
 invariants must be maintained.
@@ -2672,7 +2672,7 @@ Main rules:
 **Interview answer:** "Consistency ensures that every successful
 transaction preserves database constraints and booking business rules."
 
-### 13.3 Isolation --- Keeping concurrent requests safe
+### 14.3 Isolation --- Keeping concurrent requests safe
 
 If User A and User B want the same seat, row-level locking or atomic
 conditional update will ensure that only one can successfully claim a valid
@@ -2686,7 +2686,7 @@ the new state.
 successfully reserving the same seat. I would use row-level locking or
 atomic conditional updates inside a transaction."
 
-### 13.4 Durability --- Committed data will remain permanent
+### 14.4 Durability --- Committed data will remain permanent
 
 If a transaction is successfully committed, even if the application crashes
 or restarts, the committed booking and seat status are expected to survive
@@ -2727,7 +2727,7 @@ Explanation: After a transaction is successfully COMMITTED, even if the applicat
 
 Interview Answer: "Durability ensures that confirmed bookings and their committed database changes survive application crashes."
 
-### 13.5 Relationship between ACID and Expiry
+### 14.5 Relationship between ACID and Expiry
 
   -----------------------------------------------------------------------
   ACID property                       Role in the expiry mechanism
@@ -2747,7 +2747,7 @@ Interview Answer: "Durability ensures that confirmed bookings and their committe
                                       permanent.
   -----------------------------------------------------------------------
 
-### 13.6 Expiry vs Payment Race Condition
+### 14.6 Expiry vs Payment Race Condition
 
 At exactly `10:10 AM`, the expiry worker may want to expire the booking, and
 at the same time the payment webhook may report success.
@@ -2772,7 +2772,7 @@ semantics.
 > does not turn the database and the external payment gateway into a single
 > ACID transaction.
 
-## 14. Security and Reliability
+## 15. Security and Reliability
 
 -   **Authentication:** Use secure session or JWT-based authentication.
 -   **Authorization:** A user can view or cancel only their own booking.
@@ -2791,7 +2791,7 @@ semantics.
 -   **Sensitive data:** Do not expose payment secrets or sensitive payment
     information in logs.
 
-## 15. Scalability and Performance
+## 16. Scalability and Performance
 
 If thousands of users want to book seats at the same time:
 
@@ -2811,7 +2811,7 @@ If thousands of users want to book seats at the same time:
 For the first version, modular monolith + PostgreSQL + background worker is
 sufficient. If the need is proven, microservices can be considered.
 
-## 18. Short Answer to Say in the Interview
+## 17. Short Answer to Say in the Interview
 
 > I will design the Train Ticket Booking System with Node.js, Express.js
 > and PostgreSQL.
