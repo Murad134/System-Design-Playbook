@@ -22,15 +22,16 @@
 5.  [Status Management](#5-status-management)
 6.  [ER Diagram](#6-er-diagram)
 7.  [REST API Design](#7-rest-api-design)
-8.  [Complete Booking Flow](#8-complete-booking-flow)
-9.  [Double Booking Prevention](#9-double-booking-prevention)
-10. [10-Minute Hold and Expiry Mechanism](#10-10-minute-hold-and-expiry-mechanism)
-11. [Payment Failure and Delayed Webhook](#11-payment-failure-and-delayed-webhook)
-12. [Database Transaction](#12-database-transaction)
-13. [ACID Properties](#13-acid-properties)
-14. [Security and Reliability](#14-security-and-reliability)
-15. [Scalability and Performance](#15-scalability-and-performance)
-16. [Short Answer to Say in the Interview](#18-short-answer-to-say-in-the-interview)
+8.  [Edge Case Design](#8-edge-case-design)
+9.  [Complete Booking Flow](#8-complete-booking-flow)
+10.  [Double Booking Prevention](#9-double-booking-prevention)
+11. [10-Minute Hold and Expiry Mechanism](#10-10-minute-hold-and-expiry-mechanism)
+12. [Payment Failure and Delayed Webhook](#11-payment-failure-and-delayed-webhook)
+13. [Database Transaction](#12-database-transaction)
+14. [ACID Properties](#13-acid-properties)
+15. [Security and Reliability](#14-security-and-reliability)
+16. [Scalability and Performance](#15-scalability-and-performance)
+17. [Short Answer to Say in the Interview](#18-short-answer-to-say-in-the-interview)
 
 ------------------------------------------------------------------------
 
@@ -1558,12 +1559,13 @@ erDiagram
     USERS ||--o{ BOOKINGS : creates
     TRAINS ||--o{ TRIPS : operates
 
+    TRAINS ||--o{ TRIP_STOPS : serves_via_trips
+    STATIONS ||--o{ TRIP_STOPS : visited_at
+
     STATIONS ||--o{ TRIPS : departure
     STATIONS ||--o{ TRIPS : arrival
 
     TRIPS ||--o{ TRIP_STOPS : contains
-    STATIONS ||--o{ TRIP_STOPS : identifies
-
     TRIPS ||--o{ TRIP_SEATS : contains
     TRIPS ||--o{ BOOKINGS : receives
 
@@ -1940,6 +1942,321 @@ Use a consistent error response structure:
 Administrative endpoints can be added for managing stations, trains, trips, schedules, and seat inventory.
 
 The background worker responsible for expiring bookings is an internal process and does not need a public passenger endpoint.
+
+## 8. Edge Case Design
+
+### 1. How to Think About Edge Cases
+
+An edge case is an unusual, unexpected, or boundary condition that can cause a system to behave incorrectly if it is not handled explicitly.
+
+In a Train Ticket Booking System, designing only the successful booking flow is insufficient. We must also consider concurrent requests, network failures, payment delays, duplicate events, expired reservations, and partial failures.
+
+For every important operation, ask:
+
+1. What can go wrong?
+2. Why can it happen?
+3. What should the system do in that situation?
+4. Which database constraints, transactions, or API validations are required?
+5. How can the operation be retried or recovered safely?
+
+The goal is to preserve **data consistency, seat-allocation correctness, payment accuracy, and a predictable user experience** even when failures occur.
+
+### 2. Identify Critical Edge Cases
+
+Start by examining each stage of the booking lifecycle.
+
+| Stage | Potential edge case |
+|---|---|
+| Trip Search | The trip does not exist or has been cancelled. |
+| Seat Selection | A seat becomes unavailable after the passenger views it. |
+| Booking Creation | Two passengers request the same seat simultaneously. |
+| Booking Retry | The client retries after a timeout and accidentally creates another booking. |
+| Seat Hold | The booking expires while the passenger is completing payment. |
+| Payment | The payment fails, times out, or remains pending. |
+| Webhook | The gateway sends the same event more than once. |
+| Late Payment | Payment succeeds after the booking expires. |
+| Confirmation | Payment succeeds, but the booking cannot be fulfilled. |
+| Ticket Issuance | Booking confirmation succeeds, but ticket generation fails. |
+| Cancellation | Cancellation and payment processing happen concurrently. |
+| Refund | A refund request is submitted more than once. |
+
+Prioritize edge cases that can cause double booking, incorrect charges, lost reservations, or unauthorized access.
+
+---
+
+### 3. Edge Case Analysis
+
+#### 3.1 Two Passengers Book the Same Seat
+
+**Scenario**
+
+Two passengers request seat `A1` on the same trip at nearly the same time.
+
+**Root cause**
+
+Both requests may read the seat as `AVAILABLE` before either request updates the database.
+
+**Expected behavior**
+
+Only one passenger can successfully reserve the seat. The other request must fail without creating a partial booking.
+
+**Design solution**
+
+- Use a database transaction.
+- Lock or conditionally update the relevant seat rows.
+- Verify that all requested seats are still eligible for reservation.
+- Commit the booking and all seat allocations atomically.
+- Return `409 Conflict` if a requested seat is no longer available.
+
+**Key principle:** Checking availability and allocating seats must not be treated as separate, unprotected operations.
+
+#### 3.2 The Client Retries Booking Creation
+
+**Scenario**
+
+The backend creates a booking, but the response is lost because of a network timeout. The passenger retries the same request.
+
+**Root cause**
+
+The client cannot determine whether the original request succeeded.
+
+**Expected behavior**
+
+The retry must return the original result rather than creating another booking.
+
+**Design solution**
+
+- Accept an `Idempotency-Key` header.
+- Store the key and its associated result.
+- Enforce a suitable uniqueness constraint, such as `(user_id, idempotency_key)`.
+- Return the existing result when the same key is reused with the same request.
+- Reject reuse of the key with a different request payload.
+
+**Key principle:** A network timeout does not prove that the original operation failed.
+
+#### 3.3 The Booking Expires During Payment
+
+**Scenario**
+
+A passenger creates a booking at 10:00 AM. The seat hold expires at 10:10 AM, but the passenger's payment remains pending.
+
+**Root cause**
+
+Payment processing and reservation expiry operate independently.
+
+**Expected behavior**
+
+The system must follow an explicit expiry policy. A booking must not be confirmed merely because a payment eventually succeeds.
+
+**Design solution**
+
+- Store the authoritative expiry timestamp in the database.
+- Check the booking status, deadline, and seat ownership during confirmation.
+- Release seats only when the booking is still eligible for expiry.
+- Prevent the expiry worker and payment handler from making conflicting state transitions.
+- Apply a documented policy for payments that succeed after expiry.
+
+A late payment may require a refund if the original reservation can no longer be fulfilled.
+
+**Key principle:** The expiry worker and payment handler must coordinate through transactional state validation, not rely only on timers.
+
+#### 3.4 Duplicate Payment Webhook
+
+**Scenario**
+
+The payment gateway sends the same successful payment notification multiple times.
+
+**Root cause**
+
+Payment gateways commonly retry webhook delivery when acknowledgements are delayed or lost.
+
+**Expected behavior**
+
+The payment must be processed once logically, even if the notification is delivered repeatedly.
+
+**Design solution**
+
+- Verify the gateway signature.
+- Store a unique gateway event identifier.
+- Use a database uniqueness constraint to deduplicate events.
+- Process the payment and booking transition transactionally where possible.
+- Make ticket issuance and downstream event processing idempotent.
+
+**Key principle:** Exactly-once delivery should not be assumed. Design for at-least-once delivery and idempotent processing.
+
+#### 3.5 Payment Succeeds but Booking Confirmation Fails
+
+**Scenario**
+
+The payment gateway reports success, but the booking has expired or the seats have already been released.
+
+**Root cause**
+
+Payment success and reservation eligibility are different conditions.
+
+**Expected behavior**
+
+The system must not confirm an invalid reservation or allocate seats already held by another passenger.
+
+**Design solution**
+
+- Verify payment authenticity, amount, and currency.
+- Lock or conditionally update the booking and relevant seat records.
+- Verify that the booking remains eligible for confirmation.
+- Confirm the booking only if the required conditions are satisfied.
+- Otherwise, follow the late-payment policy, including refund processing when applicable.
+
+**Key principle:** A successful payment is necessary for confirmation, but it may not be sufficient.
+
+#### 3.6 The Background Worker Crashes During Expiry Processing
+
+**Scenario**
+
+The expiry worker starts processing an expired booking but crashes before releasing its seats.
+
+**Root cause**
+
+The process fails midway through its work.
+
+**Expected behavior**
+
+The system must be able to retry the operation without corrupting booking or seat state.
+
+**Design solution**
+
+- Update the booking status and release its seats in the same database transaction.
+- Select only bookings that are still eligible for expiry.
+- Use row locking or conditional updates to coordinate with payment processing.
+- Retry failed jobs safely.
+- Monitor repeated failures and bookings that remain expired but unprocessed.
+
+**Key principle:** Expiry processing must be atomic, retryable, and safe to execute more than once.
+
+#### 3.7 Booking Confirmation Succeeds but Ticket Issuance Fails
+
+**Scenario**
+
+The database confirms the booking, but the application crashes before generating the ticket or sending the notification.
+
+**Root cause**
+
+The booking transaction and the external side effect do not share one atomic transaction.
+
+**Expected behavior**
+
+The confirmed booking must not be lost, and ticket issuance must be recoverable.
+
+**Design solution**
+
+- Commit the booking confirmation and an outbox event in the same database transaction.
+- Let a background worker publish or process the event.
+- Retry ticket generation using an idempotent operation.
+- Enforce ticket uniqueness where appropriate.
+- Track processing failures and support recovery.
+
+**Key principle:** Use the transactional outbox pattern when a committed database change must reliably trigger asynchronous work.
+
+#### 3.8 Cancellation and Payment Processing Happen Concurrently
+
+**Scenario**
+
+A passenger requests cancellation at the same time a payment-success webhook is being processed.
+
+**Root cause**
+
+Two independent operations attempt to change related business state.
+
+**Expected behavior**
+
+The booking must follow one valid state transition. Cancellation, confirmation, and refund operations must not overwrite one another blindly.
+
+**Design solution**
+
+- Define allowed booking-state transitions.
+- Lock or conditionally update the booking during state changes.
+- Recheck the current state inside the transaction.
+- Record the payment result independently from the booking status.
+- Apply the cancellation and refund policy based on the final valid state.
+
+**Key principle:** Validate the current state when applying a transition, not only when the request first arrives.
+
+#### 3.9 Duplicate Refund Request
+
+**Scenario**
+
+The client retries a refund request after a timeout, or the refund worker processes the same request twice.
+
+**Root cause**
+
+The caller cannot tell whether the original refund operation succeeded.
+
+**Expected behavior**
+
+The system must not issue duplicate refunds or refund more than the amount permitted by policy.
+
+**Design solution**
+
+- Use an idempotency key for refund creation.
+- Store and uniquely identify gateway refund references when available.
+- Track refund attempts and their outcomes.
+- Enforce refund amount limits against the amount actually captured and any previous refunds.
+- Reconcile uncertain gateway outcomes before retrying an operation that might move money.
+
+**Key principle:** Financial operations require idempotency, amount validation, and reconciliation.
+
+#### 3.10 The Client Submits Invalid or Unauthorized Data
+
+**Scenario**
+
+A passenger submits seat IDs from another trip or attempts to access another passenger's booking.
+
+**Root cause**
+
+The client is untrusted and may send stale, invalid, or manipulated identifiers.
+
+**Expected behavior**
+
+The backend must reject the request without changing protected data.
+
+**Design solution**
+
+- Authenticate the requester.
+- Validate that every selected seat belongs to the specified trip.
+- Verify booking ownership or the caller's explicit permissions.
+- Validate the requested state transition.
+- Use database foreign keys and constraints to protect data integrity.
+
+**Key principle:** Frontend validation improves usability, but the backend must enforce all security and business rules.
+
+---
+
+### 4. Edge Case Protection Matrix
+
+| Risk | Primary protection | Expected outcome |
+|---|---|---|
+| Double booking | Transactions, row locking or conditional updates, constraints | At most one active allocation per trip seat |
+| Duplicate booking request | Idempotency key and unique constraint | No duplicate logical booking |
+| Expired reservation | Transactional expiry processing and state validation | Eligible seats are released safely |
+| Duplicate webhook | Unique event ID and idempotent handler | No duplicate logical processing |
+| Late payment | Payment verification and reservation eligibility checks | No invalid booking confirmation |
+| Worker crash | Atomic updates, retries, monitoring | Safe recovery |
+| Ticket generation failure | Transactional outbox and idempotent consumer | Ticket issuance can be retried |
+| Duplicate refund | Idempotency, refund limits, gateway reconciliation | No unintended duplicate refund |
+| Unauthorized access | Authentication, authorization, ownership checks | Protected data remains inaccessible |
+
+---
+
+### 5. How to Approach Edge Case Design
+
+Use the following workflow when designing any critical feature.
+
+1. **Define the normal flow:** Describe what should happen when every operation succeeds.
+2. **Identify failure points:** Consider concurrency, timeouts, retries, invalid data, and service failures.
+3. **Define invariants:** Specify what must always remain true, such as one active allocation per trip seat.
+4. **Choose the protection mechanism:** Use transactions, constraints, idempotency, authorization, or asynchronous recovery as appropriate.
+5. **Define the API outcome:** Select the appropriate success or error response.
+6. **Plan recovery:** Decide how uncertain or failed operations can be retried or reconciled.
+7. **Test the scenario:** Verify the behavior using concurrent requests, duplicate events, and injected failures.
 
 ## 8. Complete Booking Flow
 
